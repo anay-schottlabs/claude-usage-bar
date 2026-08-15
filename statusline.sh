@@ -8,7 +8,6 @@ input="$(cat)"
 
 bar_width=40
 reset='\033[0m'
-dim='\033[2m'
 cache_file="$HOME/.claude/claude-usage-bar-cache.json"
 line_count_cache="$HOME/.claude/claude-usage-bar-linecount-cache.json"
 
@@ -77,7 +76,7 @@ format_reset() {
 # label, jq path, bar width, low color, mid color, cache key, include_date -- high color is always red.
 render_section() {
   local label="$1" pct_path="$2" resets_path="$3" low_color="$4" mid_color="$5" cache_key="$6" include_date="${7:-0}"
-  local pct resets_at pct_int bar color reset_str stale=0
+  local pct resets_at pct_int bar color reset_str
 
   pct="$(jq -r "$pct_path // empty" <<<"$input")"
   resets_at="$(jq -r "$resets_path // empty" <<<"$input")"
@@ -95,7 +94,6 @@ render_section() {
     if [ -n "$cached_resets" ] && [ "$cached_resets" -gt "$(date +%s)" ]; then
       pct="$(read_cache_field "$cache_key" "used_percentage")"
       resets_at="$cached_resets"
-      stale=1
     fi
   fi
 
@@ -117,7 +115,6 @@ render_section() {
   else
     color="$low_color"
   fi
-  [ "$stale" -eq 1 ] && color="${dim}${color}"
 
   bar="$(render_bar "$pct_int" "$bar_width")"
 
@@ -126,10 +123,7 @@ render_section() {
     reset_str=" · resets $(format_reset "$resets_at" "$include_date")"
   fi
 
-  local stale_mark=""
-  [ "$stale" -eq 1 ] && stale_mark="~"
-
-  printf "%s [${color}%s${reset}] %d%%%s%s" "$label" "$bar" "$pct_int" "$stale_mark" "$reset_str"
+  printf "%s [${color}%s${reset}] %d%%%s" "$label" "$bar" "$pct_int" "$reset_str"
 }
 
 # "+123 -45 lines" from this session's cumulative edits (green/red, 0 omitted if both are 0).
