@@ -192,4 +192,4 @@ stats_line="$git_status"
 [ -n "$commit_stats" ] && stats_line="$stats_line  │  $commit_stats"
 stats_line="$stats_line  │  $(printf '%b' "$lines_changed")"
 
-printf "\n%s  │  %s\n%b\n\n" "$five_hour" "$seven_day" "$stats_line"
+printf "\n%s  │  %s\n%b\n\n\n" "$five_hour" "$seven_day" "$stats_line"
