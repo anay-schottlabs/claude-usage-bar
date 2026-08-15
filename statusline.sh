@@ -8,6 +8,31 @@ input="$(cat)"
 
 bar_width=40
 reset='\033[0m'
+dim='\033[2m'
+cache_file="$HOME/.claude/claude-usage-bar-cache.json"
+
+# Last-known used_percentage/resets_at for a rate-limit window ("five_hour" or
+# "seven_day"), read from the on-disk cache. Empty if no cache or field missing.
+read_cache_field() {
+  local key="$1" field="$2"
+  [ -f "$cache_file" ] || return 0
+  jq -r --arg k "$key" --arg f "$field" '.[$k][$f] // empty' "$cache_file" 2>/dev/null || true
+}
+
+# Persist the latest live reading for a rate-limit window, preserving the
+# other window's cached entry. Best-effort: failures here never break the bar.
+write_cache_field() {
+  local key="$1" pct="$2" resets_at="$3" tmp
+  tmp="$(mktemp "${cache_file}.XXXXXX" 2>/dev/null)" || return 0
+  if [ -f "$cache_file" ]; then
+    jq --arg k "$key" --argjson pct "$pct" --argjson resets "$resets_at" \
+      '.[$k] = {used_percentage: $pct, resets_at: $resets}' "$cache_file" >"$tmp" 2>/dev/null
+  else
+    jq -n --arg k "$key" --argjson pct "$pct" --argjson resets "$resets_at" \
+      '{($k): {used_percentage: $pct, resets_at: $resets}}' >"$tmp" 2>/dev/null
+  fi
+  mv "$tmp" "$cache_file" 2>/dev/null || rm -f "$tmp"
+}
 
 # Build a filled/empty block bar string of the given width for a percentage.
 render_bar() {
@@ -48,13 +73,30 @@ format_reset() {
   printf '%s (%s)' "$time_str" "$dur_str"
 }
 
-# label, jq path, bar width, low color, mid color, include_date -- high color is always red.
+# label, jq path, bar width, low color, mid color, cache key, include_date -- high color is always red.
 render_section() {
-  local label="$1" pct_path="$2" resets_path="$3" low_color="$4" mid_color="$5" include_date="${6:-0}"
-  local pct resets_at pct_int bar color reset_str
+  local label="$1" pct_path="$2" resets_path="$3" low_color="$4" mid_color="$5" cache_key="$6" include_date="${7:-0}"
+  local pct resets_at pct_int bar color reset_str stale=0
 
   pct="$(jq -r "$pct_path // empty" <<<"$input")"
   resets_at="$(jq -r "$resets_path // empty" <<<"$input")"
+
+  if [ -n "$pct" ] && [ -n "$resets_at" ]; then
+    write_cache_field "$cache_key" "$pct" "$resets_at"
+  fi
+
+  # No live reading yet this session (e.g. right after reopening a chat, before
+  # the first response) -- fall back to the last-known value if its window
+  # hasn't rolled over yet.
+  if [ -z "$pct" ]; then
+    local cached_resets
+    cached_resets="$(read_cache_field "$cache_key" "resets_at")"
+    if [ -n "$cached_resets" ] && [ "$cached_resets" -gt "$(date +%s)" ]; then
+      pct="$(read_cache_field "$cache_key" "used_percentage")"
+      resets_at="$cached_resets"
+      stale=1
+    fi
+  fi
 
   if [ -z "$pct" ]; then
     local dots
@@ -74,6 +116,7 @@ render_section() {
   else
     color="$low_color"
   fi
+  [ "$stale" -eq 1 ] && color="${dim}${color}"
 
   bar="$(render_bar "$pct_int" "$bar_width")"
 
@@ -82,7 +125,10 @@ render_section() {
     reset_str=" · resets $(format_reset "$resets_at" "$include_date")"
   fi
 
-  printf "%s [${color}%s${reset}] %d%%%s" "$label" "$bar" "$pct_int" "$reset_str"
+  local stale_mark=""
+  [ "$stale" -eq 1 ] && stale_mark="~"
+
+  printf "%s [${color}%s${reset}] %d%%%s%s" "$label" "$bar" "$pct_int" "$stale_mark" "$reset_str"
 }
 
 # "+123 -45 lines" from this session's cumulative edits (green/red, 0 omitted if both are 0).
@@ -134,8 +180,8 @@ render_commit_count() {
   printf '%s commits' "$count"
 }
 
-five_hour="$(render_section "5h" '.rate_limits.five_hour.used_percentage' '.rate_limits.five_hour.resets_at' '\033[32m' '\033[33m')"
-seven_day="$(render_section "7d" '.rate_limits.seven_day.used_percentage' '.rate_limits.seven_day.resets_at' '\033[36m' '\033[35m' 1)"
+five_hour="$(render_section "5h" '.rate_limits.five_hour.used_percentage' '.rate_limits.five_hour.resets_at' '\033[32m' '\033[33m' 'five_hour')"
+seven_day="$(render_section "7d" '.rate_limits.seven_day.used_percentage' '.rate_limits.seven_day.resets_at' '\033[36m' '\033[35m' 'seven_day' 1)"
 lines_changed="$(render_lines_changed)"
 git_status="$(render_git_status)"
 commit_count="$(render_commit_count)"
