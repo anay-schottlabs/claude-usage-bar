@@ -9,8 +9,11 @@ input="$(cat)"
 pct="$(jq -r '.rate_limits.five_hour.used_percentage // empty' <<<"$input")"
 resets_at="$(jq -r '.rate_limits.five_hour.resets_at // empty' <<<"$input")"
 
+bar_width=40
+
 if [ -z "$pct" ]; then
-  echo "5h [··········] n/a"
+  dots="$(printf '%*s' "$bar_width" '' | tr ' ' '·')"
+  printf '\n5h [%s] n/a\n' "$dots"
   exit 0
 fi
 
@@ -19,7 +22,6 @@ pct_int="$(awk -v p="$pct" 'BEGIN { printf "%d", (p + 0.5) }')"
 [ "$pct_int" -gt 100 ] && pct_int=100
 [ "$pct_int" -lt 0 ] && pct_int=0
 
-bar_width=10
 filled="$(( pct_int * bar_width / 100 ))"
 empty="$(( bar_width - filled ))"
 
@@ -47,4 +49,4 @@ if [ -n "$resets_at" ]; then
   fi
 fi
 
-printf "5h [${color}%s${reset}] %d%%%s\n" "$bar" "$pct_int" "$reset_str"
+printf "\n5h [${color}%s${reset}] %d%%%s\n" "$bar" "$pct_int" "$reset_str"
