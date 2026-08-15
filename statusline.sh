@@ -170,24 +170,33 @@ render_git_status() {
   printf '%s %b%s' "$branch" "$status_str" "$sync_str"
 }
 
-# Total commit count on the current branch.
-render_commit_count() {
-  local cwd count
+# "142 pushed, 3 unpushed" (against the tracked upstream) or, with no
+# upstream configured, "142 commits (no upstream)".
+render_commit_stats() {
+  local cwd pushed unpushed total
   cwd="$(jq -r '.cwd // empty' <<<"$input")"
   [ -z "$cwd" ] && cwd="."
 
-  count="$(git -C "$cwd" rev-list --count HEAD 2>/dev/null)" || { printf ''; return; }
-  printf '%s commits' "$count"
+  git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { printf ''; return; }
+
+  if git -C "$cwd" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
+    pushed="$(git -C "$cwd" rev-list --count '@{upstream}' 2>/dev/null)" || pushed=0
+    unpushed="$(git -C "$cwd" rev-list --count '@{upstream}..HEAD' 2>/dev/null)" || unpushed=0
+    printf '%s pushed, %s unpushed' "$pushed" "$unpushed"
+  else
+    total="$(git -C "$cwd" rev-list --count HEAD 2>/dev/null)" || total=0
+    printf '%s commits (no upstream)' "$total"
+  fi
 }
 
 five_hour="$(render_section "5h" '.rate_limits.five_hour.used_percentage' '.rate_limits.five_hour.resets_at' '\033[32m' '\033[33m' 'five_hour')"
 seven_day="$(render_section "7d" '.rate_limits.seven_day.used_percentage' '.rate_limits.seven_day.resets_at' '\033[36m' '\033[35m' 'seven_day' 1)"
 lines_changed="$(render_lines_changed)"
 git_status="$(render_git_status)"
-commit_count="$(render_commit_count)"
+commit_stats="$(render_commit_stats)"
 
 stats_line="$git_status"
-[ -n "$commit_count" ] && stats_line="$stats_line  │  $commit_count"
+[ -n "$commit_stats" ] && stats_line="$stats_line  │  $commit_stats"
 stats_line="$stats_line  │  $(printf '%b' "$lines_changed")"
 
 printf "\n%s  │  %s\n%b\n\n" "$five_hour" "$seven_day" "$stats_line"
