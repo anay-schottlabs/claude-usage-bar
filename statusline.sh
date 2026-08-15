@@ -145,20 +145,26 @@ render_lines_changed() {
   printf "\033[32m+%s\033[0m \033[31m-%s\033[0m lines" "$added" "$removed"
 }
 
-# "main ✓ clean ↑2↓0" / "main ●3 ↑0↓1" style branch + dirty + ahead/behind summary.
+# "main ✓ clean ↑2 ↓0" / "main ●3 (2 staged) ↑0 ↓1" style branch + dirty
+# (broken out into staged vs. not) + ahead/behind summary.
 render_git_status() {
-  local cwd branch dirty_count ahead behind status_str
+  local cwd branch dirty_count staged_count ahead behind status_str
 
   cwd="$(jq -r '.cwd // empty' <<<"$input")"
   [ -z "$cwd" ] && cwd="."
 
   branch="$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null)" || { printf 'no git repo'; return; }
 
-  dirty_count="$(git -C "$cwd" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  read -r staged_count dirty_count <<<"$(git -C "$cwd" status --porcelain 2>/dev/null | awk '
+    { total++; x = substr($0, 1, 1); if (x != " " && x != "?") staged++ }
+    END { printf "%d %d", staged + 0, total + 0 }
+  ')" || true
+
   if [ "$dirty_count" -eq 0 ]; then
     status_str="\033[32m✓ clean${reset}"
   else
     status_str="\033[33m●${dirty_count}${reset}"
+    [ "$staged_count" -gt 0 ] && status_str="${status_str} (\033[32m${staged_count} staged${reset})"
   fi
 
   read -r behind ahead <<<"$(git -C "$cwd" rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null)" || true
