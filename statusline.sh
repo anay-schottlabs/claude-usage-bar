@@ -162,9 +162,10 @@ render_git_status() {
 
   if [ "$dirty_count" -eq 0 ]; then
     status_str="\033[32m✓ clean${reset}"
+  elif [ "$staged_count" -gt 0 ]; then
+    status_str="\033[32m${staged_count} staged${reset}"
   else
-    status_str="\033[33m●${dirty_count}${reset}"
-    [ "$staged_count" -gt 0 ] && status_str="${status_str} (\033[32m${staged_count} staged${reset})"
+    status_str=""
   fi
 
   read -r behind ahead <<<"$(git -C "$cwd" rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null)" || true
@@ -173,7 +174,9 @@ render_git_status() {
     sync_str=" ↑${ahead} ↓${behind}"
   fi
 
-  printf '%s %b%s' "$branch" "$status_str" "$sync_str"
+  local out="$branch"
+  [ -n "$status_str" ] && out="$out $(printf '%b' "$status_str")"
+  printf '%s%s' "$out" "$sync_str"
 }
 
 # "142 pushed, 3 unpushed" (against the tracked upstream) or, with no
