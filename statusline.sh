@@ -85,7 +85,63 @@ render_section() {
   printf "%s [${color}%s${reset}] %d%%%s" "$label" "$bar" "$pct_int" "$reset_str"
 }
 
+# "+123 -45 lines" from this session's cumulative edits (green/red, 0 omitted if both are 0).
+render_lines_changed() {
+  local added removed
+  added="$(jq -r '.cost.total_lines_added // 0' <<<"$input")"
+  removed="$(jq -r '.cost.total_lines_removed // 0' <<<"$input")"
+
+  if [ "$added" -eq 0 ] && [ "$removed" -eq 0 ]; then
+    printf 'lines ±0'
+    return
+  fi
+
+  printf "\033[32m+%s\033[0m \033[31m-%s\033[0m lines" "$added" "$removed"
+}
+
+# "main ✓ clean ↑2↓0" / "main ●3 ↑0↓1" style branch + dirty + ahead/behind summary.
+render_git_status() {
+  local cwd branch dirty_count ahead behind status_str
+
+  cwd="$(jq -r '.cwd // empty' <<<"$input")"
+  [ -z "$cwd" ] && cwd="."
+
+  branch="$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null)" || { printf 'no git repo'; return; }
+
+  dirty_count="$(git -C "$cwd" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$dirty_count" -eq 0 ]; then
+    status_str="\033[32m✓ clean${reset}"
+  else
+    status_str="\033[33m●${dirty_count}${reset}"
+  fi
+
+  read -r behind ahead <<<"$(git -C "$cwd" rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null)" || true
+  local sync_str=""
+  if [ -n "$ahead" ]; then
+    sync_str=" ↑${ahead}↓${behind}"
+  fi
+
+  printf '%s %b%s' "$branch" "$status_str" "$sync_str"
+}
+
+# Total commit count on the current branch.
+render_commit_count() {
+  local cwd count
+  cwd="$(jq -r '.cwd // empty' <<<"$input")"
+  [ -z "$cwd" ] && cwd="."
+
+  count="$(git -C "$cwd" rev-list --count HEAD 2>/dev/null)" || { printf ''; return; }
+  printf '%s commits' "$count"
+}
+
 five_hour="$(render_section "5h" '.rate_limits.five_hour.used_percentage' '.rate_limits.five_hour.resets_at' '\033[32m' '\033[33m')"
 seven_day="$(render_section "7d" '.rate_limits.seven_day.used_percentage' '.rate_limits.seven_day.resets_at' '\033[36m' '\033[35m' 1)"
+lines_changed="$(render_lines_changed)"
+git_status="$(render_git_status)"
+commit_count="$(render_commit_count)"
 
-printf "\n%s  │  %s\n\n" "$five_hour" "$seven_day"
+stats_line="$git_status"
+[ -n "$commit_count" ] && stats_line="$stats_line  │  $commit_count"
+stats_line="$stats_line  │  $(printf '%b' "$lines_changed")"
+
+printf "\n%s  │  %s\n%b\n\n" "$five_hour" "$seven_day" "$stats_line"
