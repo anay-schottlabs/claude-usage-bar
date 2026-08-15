@@ -10,6 +10,7 @@ bar_width=40
 reset='\033[0m'
 dim='\033[2m'
 cache_file="$HOME/.claude/claude-usage-bar-cache.json"
+line_count_cache="$HOME/.claude/claude-usage-bar-linecount-cache.json"
 
 # Last-known used_percentage/resets_at for a rate-limit window ("five_hour" or
 # "seven_day"), read from the on-disk cache. Empty if no cache or field missing.
@@ -182,14 +183,52 @@ render_commit_stats() {
   fi
 }
 
+# Total line count across every file under cwd (excluding .git internals),
+# for the whole codebase regardless of subfolder depth. Cached for 30s per
+# directory since a full recursive scan is too slow to run on every refresh.
+render_total_lines() {
+  local cwd now cached_cwd cached_total cached_time total tmp formatted
+  cwd="$(jq -r '.cwd // empty' <<<"$input")"
+  [ -z "$cwd" ] && cwd="."
+  [ -d "$cwd" ] || { printf ''; return; }
+
+  now="$(date +%s)"
+  total=""
+
+  if [ -f "$line_count_cache" ]; then
+    read -r cached_cwd cached_total cached_time <<<"$(jq -r '[.cwd, .total, .computed_at] | @tsv' "$line_count_cache" 2>/dev/null)" || true
+    if [ "$cached_cwd" = "$cwd" ] && [ -n "$cached_time" ] && [ $(( now - cached_time )) -lt 30 ]; then
+      total="$cached_total"
+    fi
+  fi
+
+  if [ -z "$total" ]; then
+    total="$(find "$cwd" -type f -not -path '*/.git/*' -exec cat {} + 2>/dev/null | wc -l | tr -d ' ')" || total=0
+    tmp="$(mktemp "${line_count_cache}.XXXXXX" 2>/dev/null)" && {
+      jq -n --arg cwd "$cwd" --argjson total "$total" --argjson t "$now" \
+        '{cwd: $cwd, total: $total, computed_at: $t}' >"$tmp" 2>/dev/null
+      mv "$tmp" "$line_count_cache" 2>/dev/null || rm -f "$tmp"
+    }
+  fi
+
+  formatted="$(printf '%s' "$total" | rev | sed 's/[0-9]\{3\}/&,/g;s/,$//' | rev)"
+  printf '%s total lines' "$formatted"
+}
+
 five_hour="$(render_section "5h" '.rate_limits.five_hour.used_percentage' '.rate_limits.five_hour.resets_at' '\033[32m' '\033[33m' 'five_hour')"
 seven_day="$(render_section "7d" '.rate_limits.seven_day.used_percentage' '.rate_limits.seven_day.resets_at' '\033[36m' '\033[35m' 'seven_day' 1)"
 lines_changed="$(render_lines_changed)"
 git_status="$(render_git_status)"
 commit_stats="$(render_commit_stats)"
+total_lines="$(render_total_lines)"
 
 stats_line="$git_status"
 [ -n "$commit_stats" ] && stats_line="$stats_line  │  $commit_stats"
 stats_line="$stats_line  │  $(printf '%b' "$lines_changed")"
+[ -n "$total_lines" ] && stats_line="$stats_line  │  $total_lines"
 
-printf "\n%s  │  %s\n%b\n\n\n" "$five_hour" "$seven_day" "$stats_line"
+# A plain blank line here gets trimmed away by Claude Code before it renders
+# the statusline, so use an invisible (but non-whitespace) character to force
+# a visually-blank row that survives trailing-whitespace trimming.
+zwsp=$'​'
+printf "\n%s  │  %s\n%b\n%s\n" "$five_hour" "$seven_day" "$stats_line" "$zwsp"
