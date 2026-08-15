@@ -177,9 +177,40 @@ render_commit_stats() {
   fi
 }
 
-# Total line count across every file under cwd (excluding .git internals),
-# for the whole codebase regardless of subfolder depth. Cached for 30s per
-# directory since a full recursive scan is too slow to run on every refresh.
+# Source-file extensions counted as "code" — excludes docs, config/data,
+# lockfiles, and binary/vendored assets.
+code_globs=(
+  '*.sh' '*.bash' '*.zsh' '*.py' '*.rb' '*.js' '*.mjs' '*.cjs' '*.jsx' '*.ts' '*.mts' '*.cts' '*.tsx'
+  '*.go' '*.rs' '*.java' '*.kt' '*.kts' '*.c' '*.h' '*.cpp' '*.cc' '*.cxx' '*.hpp' '*.hh' '*.cs'
+  '*.php' '*.swift' '*.m' '*.mm' '*.scala' '*.clj' '*.cljs' '*.ex' '*.exs' '*.erl' '*.hrl' '*.hs'
+  '*.lua' '*.pl' '*.pm' '*.r' '*.sql' '*.html' '*.htm' '*.css' '*.scss' '*.sass' '*.less' '*.vue' '*.svelte'
+)
+
+# Line count across code files under $1, restricted to code_globs. Uses
+# `git ls-files` (respects .gitignore, so node_modules/build/vendor stay
+# excluded) when inside a repo; otherwise walks the tree directly, pruning
+# the usual vendor/build directories.
+count_code_lines() {
+  local dir="$1" files
+  if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    files="$(git -C "$dir" ls-files --cached --others --exclude-standard -- "${code_globs[@]}" 2>/dev/null)"
+    (cd "$dir" && printf '%s' "$files" | xargs cat -- 2>/dev/null) | wc -l | tr -d ' '
+  else
+    local find_expr=()
+    for g in "${code_globs[@]}"; do
+      find_expr+=(-iname "$g" -o)
+    done
+    unset 'find_expr[${#find_expr[@]}-1]'
+    find "$dir" -type d \( -name node_modules -o -name .git -o -name dist -o -name build \
+        -o -name vendor -o -name .venv -o -name venv -o -name __pycache__ -o -name target \
+        -o -name .next -o -name .nuxt -o -name out -o -name coverage -o -name .cache \) -prune -o \
+      -type f \( "${find_expr[@]}" \) -exec cat {} + 2>/dev/null | wc -l | tr -d ' '
+  fi
+}
+
+# Total line count of code files under cwd, for the whole codebase regardless
+# of subfolder depth. Cached for 30s per directory since a full recursive
+# scan is too slow to run on every refresh.
 render_total_lines() {
   local cwd now cached_cwd cached_total cached_time total tmp formatted
   cwd="$(jq -r '.cwd // empty' <<<"$input")"
@@ -197,7 +228,7 @@ render_total_lines() {
   fi
 
   if [ -z "$total" ]; then
-    total="$(find "$cwd" -type f -not -path '*/.git/*' -exec cat {} + 2>/dev/null | wc -l | tr -d ' ')" || total=0
+    total="$(count_code_lines "$cwd")" || total=0
     tmp="$(mktemp "${line_count_cache}.XXXXXX" 2>/dev/null)" && {
       jq -n --arg cwd "$cwd" --argjson total "$total" --argjson t "$now" \
         '{cwd: $cwd, total: $total, computed_at: $t}' >"$tmp" 2>/dev/null
@@ -206,7 +237,7 @@ render_total_lines() {
   fi
 
   formatted="$(printf '%s' "$total" | rev | sed 's/[0-9]\{3\}/&,/g;s/,$//' | rev)"
-  printf '%s total lines' "$formatted"
+  printf '%s lines of code' "$formatted"
 }
 
 five_hour="$(render_section "5h" '.rate_limits.five_hour.used_percentage' '.rate_limits.five_hour.resets_at' '\033[32m' '\033[33m' 'five_hour')"
