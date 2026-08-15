@@ -118,7 +118,7 @@ render_git_status() {
   read -r behind ahead <<<"$(git -C "$cwd" rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null)" || true
   local sync_str=""
   if [ -n "$ahead" ]; then
-    sync_str=" ↑${ahead}↓${behind}"
+    sync_str=" ↑${ahead} ↓${behind}"
   fi
 
   printf '%s %b%s' "$branch" "$status_str" "$sync_str"
