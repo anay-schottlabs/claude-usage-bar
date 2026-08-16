@@ -81,6 +81,12 @@ render_section() {
   pct="$(jq -r "$pct_path // empty" <<<"$input")"
   resets_at="$(jq -r "$resets_path // empty" <<<"$input")"
 
+  # A live window with no percentage reported yet (e.g. genuinely 0% used) --
+  # treat as 0 rather than falling through to n/a.
+  if [ -z "$pct" ] && [ -n "$resets_at" ]; then
+    pct=0
+  fi
+
   if [ -n "$pct" ] && [ -n "$resets_at" ]; then
     write_cache_field "$cache_key" "$pct" "$resets_at"
   fi
