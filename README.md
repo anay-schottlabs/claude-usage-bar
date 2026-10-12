@@ -41,3 +41,19 @@ Configured globally in `~/.claude/settings.json`:
 ```
 
 This applies to every Claude Code session on this machine.
+
+## Pause button (`pause-button/`)
+
+A Claude Code mod that adds a **⏸ Pause** button above the prompt while Claude
+is working. Pressing it tells Claude to stop at the earliest safe point and
+reply in the chat with "Done so far" and "Still to do" summaries. The button
+then becomes **▶ Continue**, which resumes from the "Still to do" list.
+
+Install (this repo is its own plugin marketplace):
+
+```
+/plugin install pause-button --marketplace anay-schottlabs/claude-usage-bar
+```
+
+Or from a local clone: `claude plugin marketplace add <clone path>` then
+`claude plugin install pause-button@claude-usage-bar --scope user`.

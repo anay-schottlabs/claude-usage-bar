@@ -1,0 +1,1 @@
+{ "name": "pause-button", "version": "0.1.0", "description": "Pause/Continue button: Claude stops at the earliest safe point and summarizes done/remaining work", "types": "./types/index.d.ts" }

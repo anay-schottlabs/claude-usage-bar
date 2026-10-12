@@ -1,0 +1,5 @@
+{
+  "name": "claude-usage-bar",
+  "owner": { "name": "Anay Dandekar" },
+  "plugins": [{ "name": "pause-button", "source": "./pause-button" }]
+}
