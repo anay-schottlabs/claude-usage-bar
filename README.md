@@ -20,6 +20,11 @@ renders a colored progress bar with the reset countdown, e.g.:
   `~` marker instead of going blank — as long as the cached window hasn't
   reset yet. Once it rolls over, it falls back to `n/a` until fresh data
   arrives.
+- The cache is shared by every Claude Code session, so all open chats stay in
+  sync: each render keeps whichever reading is newest (a later window wins;
+  within the same window the higher percentage wins), and
+  `refreshInterval` re-runs the script every 5s so idle chats pick up usage
+  from active ones.
 
 ## Setup
 
@@ -29,7 +34,8 @@ Configured globally in `~/.claude/settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "/Users/anaydandekar/Documents/code/claude-usage-bar/statusline.sh"
+    "command": "/Users/anaydandekar/Documents/code/claude-usage-bar/statusline.sh",
+    "refreshInterval": 5
   }
 }
 ```

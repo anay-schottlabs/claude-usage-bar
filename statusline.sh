@@ -87,20 +87,31 @@ render_section() {
     pct=0
   fi
 
-  if [ -n "$pct" ] && [ -n "$resets_at" ]; then
-    write_cache_field "$cache_key" "$pct" "$resets_at"
-  fi
-
-  # No live reading yet this session (e.g. right after reopening a chat, before
-  # the first response) -- fall back to the last-known value if its window
-  # hasn't rolled over yet.
-  if [ -z "$pct" ]; then
-    local cached_resets
-    cached_resets="$(read_cache_field "$cache_key" "resets_at")"
-    if [ -n "$cached_resets" ] && [ "$cached_resets" -gt "$(date +%s)" ]; then
-      pct="$(read_cache_field "$cache_key" "used_percentage")"
+  # The cache is shared by every Claude Code session on this machine, but each
+  # session's payload only refreshes after its own API responses -- so an idle
+  # chat carries a stale reading. Reconcile against the cache and keep whichever
+  # is newest: a later resets_at means a newer window, and within the same
+  # window usage only goes up, so the higher percentage wins.
+  local cached_pct cached_resets
+  cached_pct="$(read_cache_field "$cache_key" "used_percentage")"
+  cached_resets="$(read_cache_field "$cache_key" "resets_at")"
+  if [ -n "$cached_resets" ] && [ "$cached_resets" -gt "$(date +%s)" ] && [ -n "$cached_pct" ]; then
+    if [ -z "$pct" ] || [ -z "$resets_at" ]; then
+      pct="$cached_pct"
       resets_at="$cached_resets"
+    elif [ "$cached_resets" -gt $(( ${resets_at%.*} + 300 )) ]; then
+      # Cache is from a later window than this session last saw.
+      pct="$cached_pct"
+      resets_at="$cached_resets"
+    elif [ $(( cached_resets - ${resets_at%.*} )) -le 300 ] && [ $(( ${resets_at%.*} - cached_resets )) -le 300 ] \
+        && awk -v c="$cached_pct" -v p="$pct" 'BEGIN { exit !(c > p) }'; then
+      # Same window, another session has seen higher usage.
+      pct="$cached_pct"
+    else
+      write_cache_field "$cache_key" "$pct" "$resets_at"
     fi
+  elif [ -n "$pct" ] && [ -n "$resets_at" ]; then
+    write_cache_field "$cache_key" "$pct" "$resets_at"
   fi
 
   if [ -z "$pct" ]; then
