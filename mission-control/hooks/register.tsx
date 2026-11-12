@@ -15,7 +15,6 @@ import { reconcile, registerTracker } from './tracker'
 // Each module names the atoms it touches (the scan reads them per module).
 const agents = atom({ plugin: 'mission-control', key: 'agents' } as const, [] as AgentRow[], { shape: 'agents-1' })
 const frame = atom({ plugin: 'mission-control', key: 'frame' } as const, 0)
-const isBusy = atom({ plugin: 'mission-control', key: 'isBusy' } as const, false)
 const limits = atom({ plugin: 'mission-control', key: 'limits' } as const, [] as Limit[], { shape: 'limits-1' })
 const resume = atom({ plugin: 'mission-control', key: 'resume' } as const, null as Resume | null, { shape: 'resume-1' })
 const stats = atom({ plugin: 'mission-control', key: 'stats' } as const, { added: 0, removed: 0, isRepo: false } as Stats, { shape: 'stats-1' })
@@ -96,10 +95,7 @@ export const register: Register = on => {
       ticks++
       void (async () => {
         const rows = await read($, agents)
-        const isActive =
-          (await read($, isBusy)) || (await read($, resume)) !== null || rows.some(a => a.status === 'running')
-        // Animate briskly while something is happening, slowly when idle.
-        if (isActive || ticks % 2 === 0) await update($, frame, n => (n + 1) % 1_000_000)
+        await update($, frame, n => (n + 1) % 1_000_000)
         if (ticks % LIMIT_SYNC_TICKS === 0) await ctl.limits?.apply()
         if (ticks % AGENT_SYNC_TICKS === 0 && rows.some(a => a.status === 'running')) {
           const live = await $.agent.list()
