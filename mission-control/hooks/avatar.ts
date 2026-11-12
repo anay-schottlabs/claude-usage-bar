@@ -57,7 +57,7 @@ export const banner = (mood: Mood, tick: number, width: number): BannerRow[] => 
   const isWorking = mood === 'working' || mood === 'agents'
   const color = isWorking ? ACCENT : IDLE_COLOR
   // Columns per tick, and a rest after each pass so it reads as a shine.
-  const speed = mood === 'agents' ? 3 : isWorking ? 2 : 1
+  const speed = mood === 'agents' ? 5 : isWorking ? 4 : 3
   const cycle = w + rows.length + BAND + (isWorking ? 12 : 30)
   const head = (tick * speed) % cycle
 
