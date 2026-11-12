@@ -1,0 +1,6 @@
+{
+  "name": "mission-control",
+  "version": "0.1.0",
+  "description": "Split-screen dashboard beside the chat: agents with progress bars, live task list, total progress, ASCII avatar, rate limits, git stats, and auto-resume after a limit reset",
+  "types": "./types/index.d.ts"
+}
