@@ -1,69 +1,73 @@
-// The ASCII Claude spark: three rows, seven columns, one frame per tick.
+// The header: "CLAUDE" in block letters with a light sweeping across it.
 
 export type Mood = 'idle' | 'working' | 'agents' | 'waiting' | 'done'
 
 // Theme keys, so the dashboard follows the person's Claude Code theme.
 export const ACCENT = 'claude'
 
-const PLUS = ['   |   ', ' --✻-- ', '   |   ']
-const CROSS = [' \\   / ', '   ✻   ', ' /   \\ ']
-const STAR = [' \\ | / ', ' --✻-- ', ' / | \\ ']
-const BURST = [' \\ | / ', '-- ✸ --', ' / | \\ ']
-
-const WORKING = [PLUS, STAR, CROSS, STAR]
-
-// Dots orbiting the spark, one step per frame.
-const ORBIT: Array<[number, number]> = [
-  [0, 3], [0, 5], [1, 6], [2, 5], [2, 3], [2, 1], [1, 0], [0, 1],
-]
-
-const IDLE = [
-  ['       ', '   ✻   ', '       '],
-  ['       ', '   ✻   ', '       '],
-  ['   ·   ', '  ·✻·  ', '   ·   '],
-  ['       ', '   ✻   ', '       '],
-]
-
-const WAITING = [
-  ['     z ', '   ✻   ', '       '],
-  ['    Z  ', '   ✻ z ', '       '],
-  ['   z   ', '   ✻Z  ', '       '],
-  ['       ', '   ✻ z ', '       '],
-]
-
-const place = (rows: string[], dots: Array<[number, number]>) =>
-  rows.map((row, r) => {
-    const cells = [...row]
-    for (const [dr, dc] of dots) if (dr === r && cells[dc] === ' ') cells[dc] = '•'
-    return cells.join('')
-  })
-
-/** The avatar's three rows for a mood at a frame. */
-export const avatarFrame = (mood: Mood, tick: number, agentCount = 0): string[] => {
-  switch (mood) {
-    case 'idle':
-      return IDLE[Math.floor(tick / 3) % IDLE.length]!
-    case 'waiting':
-      return WAITING[Math.floor(tick / 2) % WAITING.length]!
-    case 'done':
-      return tick % 2 === 0 ? BURST : STAR
-    case 'agents': {
-      const n = Math.max(1, Math.min(4, agentCount))
-      const step = ORBIT.length / n
-      const dots = Array.from({ length: n }, (_, i) => ORBIT[(tick + Math.round(i * step)) % ORBIT.length]!)
-      return place(CROSS.map(r => r.replace(/[\\/]/g, ' ')), dots)
-    }
-    case 'working':
-      return WORKING[tick % WORKING.length]!
-  }
+// Five rows, each letter seven columns, one column between letters.
+const BIG: Record<string, string[]> = {
+  C: [' ██████', '██     ', '██     ', '██     ', ' ██████'],
+  L: ['██     ', '██     ', '██     ', '██     ', '███████'],
+  A: [' █████ ', '██   ██', '███████', '██   ██', '██   ██'],
+  U: ['██   ██', '██   ██', '██   ██', '██   ██', ' █████ '],
+  D: ['██████ ', '██   ██', '██   ██', '██   ██', '██████ '],
+  E: ['███████', '██     ', '█████  ', '██     ', '███████'],
 }
 
-/** One glyph for the inline layout. */
-export const avatarGlyph = (mood: Mood, tick: number) => {
-  if (mood === 'idle') return '✻'
-  if (mood === 'waiting') return tick % 2 === 0 ? '✻' : 'z'
+// Three rows of box-drawing for a narrow pane.
+const SMALL: Record<string, string[]> = {
+  C: ['╭─╴', '│  ', '╰─╴'],
+  L: ['╷  ', '│  ', '╰─╴'],
+  A: ['╭─╮', '├─┤', '╵ ╵'],
+  U: ['╷ ╷', '│ │', '╰─╯'],
+  D: ['┌─╮', '│ │', '└─╯'],
+  E: ['╭─╴', '├╴ ', '╰─╴'],
+}
+
+const spell = (font: Record<string, string[]>, word: string) => {
+  const letters = [...word].map(ch => font[ch]!)
+  return letters[0]!.map((_, row) => letters.map(l => l[row]).join(' '))
+}
+
+const BIG_ROWS = spell(BIG, 'CLAUDE')
+const SMALL_ROWS = spell(SMALL, 'CLAUDE')
+export const BANNER_WIDTH = BIG_ROWS[0]!.length
+
+/** One row of the banner split around the bright band: dim, bright, dim. */
+export type BannerRow = { before: string; lit: string; after: string; isDim: boolean }
+
+const BAND = 4
+
+/**
+ * The banner for a mood at a frame. Working, a bright band sweeps diagonally
+ * across the letters; with agents it sweeps faster; waiting, it sleeps dim;
+ * done, it glows whole; idle, it rests lit with a slow shimmer.
+ */
+export const banner = (mood: Mood, tick: number, width: number): BannerRow[] => {
+  const rows = width >= BANNER_WIDTH ? BIG_ROWS : SMALL_ROWS
+  const w = rows[0]!.length
+  const cycle = w + rows.length + BAND * 2 + 8
+  const speed = mood === 'agents' ? 3 : mood === 'working' ? 2 : 1
+  const head = ((tick * speed) % cycle) - BAND
+
+  return rows.map((row, r) => {
+    if (mood === 'waiting') return { before: row, lit: '', after: '', isDim: true }
+    if (mood === 'done') return tick % 6 < 3 ? { before: '', lit: row, after: '', isDim: false } : { before: row, lit: '', after: '', isDim: false }
+    if (mood === 'idle' && tick % (w + 20) >= w) return { before: row, lit: '', after: '', isDim: false }
+    // A diagonal: lower rows lag a column per row.
+    const start = Math.max(0, Math.min(w, (mood === 'idle' ? tick % (w + 20) : head) - r))
+    const end = Math.max(0, Math.min(w, start + BAND))
+    return { before: row.slice(0, start), lit: row.slice(start, end), after: row.slice(end), isDim: mood !== 'idle' }
+  })
+}
+
+/** The spinner glyph beside the status line. */
+export const glyph = (mood: Mood, tick: number) => {
+  if (mood === 'waiting') return ['z', 'Z', 'z', ' '][tick % 4]!
   if (mood === 'done') return '✸'
-  return ['✻', '✼', '✽', '✾'][tick % 4]!
+  if (mood === 'idle') return '✻'
+  return ['✻', '✼', '✽', '✾', '✽', '✼'][tick % 6]!
 }
 
 export const moodLabel = (mood: Mood) =>

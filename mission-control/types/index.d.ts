@@ -45,6 +45,15 @@ export type Stats = {
   isRepo: boolean
 }
 
+/** The main conversation, drawn as the first agent row. */
+export type MainRow = {
+  /** `running` during a main-loop turn, `done` after one, `idle` before the first. */
+  phase: 'idle' | 'running' | 'done'
+  current: string
+  /** Tool calls in the current (or last) piece of work. */
+  toolCount: number
+}
+
 export type Resume = {
   /** Epoch milliseconds the resume fires at. */
   at: number
@@ -61,6 +70,9 @@ declare module 'claude-code' {
       frame: number
       isBusy: boolean
       resume: Shaped<Resume | null>
+      main: Shaped<MainRow>
+      /** Prompts the person queued during the running main turn. */
+      queued: number
     }
   }
 }

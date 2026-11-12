@@ -1,13 +1,12 @@
 import { atom, read } from 'claude-code'
 import type { On } from 'claude-code'
 
-import type { AgentRow, Limit, Resume, Stats, Task } from '../types'
-import { ACCENT, avatarFrame, avatarGlyph, moodLabel } from './avatar'
+import type { AgentRow, Limit, MainRow, Resume, Stats, Task } from '../types'
+import { ACCENT, banner, glyph, moodLabel } from './avatar'
 import type { Mood } from './avatar'
-import { bar, formatReset, indeterminate, limitLabel, thousands, truncate } from './format'
 import { ctl } from './controllers'
+import { bar, formatReset, indeterminate, limitLabel, thousands, truncate } from './format'
 import { resumeLabel } from './limits'
-
 
 // Each module names the atoms it touches (the scan reads them per module).
 const agents = atom({ plugin: 'mission-control', key: 'agents' } as const, [] as AgentRow[], { shape: 'agents-1' })
@@ -17,9 +16,14 @@ const limits = atom({ plugin: 'mission-control', key: 'limits' } as const, [] as
 const resume = atom({ plugin: 'mission-control', key: 'resume' } as const, null as Resume | null, { shape: 'resume-1' })
 const stats = atom({ plugin: 'mission-control', key: 'stats' } as const, { added: 0, removed: 0, isRepo: false } as Stats, { shape: 'stats-1' })
 const tasks = atom({ plugin: 'mission-control', key: 'tasks' } as const, [] as Task[], { shape: 'tasks-1' })
+const main = atom({ plugin: 'mission-control', key: 'main' } as const, { phase: 'idle', current: '', toolCount: 0 } as MainRow, {
+  shape: 'main-1',
+})
+const queued = atom({ plugin: 'mission-control', key: 'queued' } as const, 0)
 
-const MAX_TASK_ROWS = 12
+const MAX_TASK_ROWS = 14
 const MAX_AGENT_ROWS = 8
+const MAIN = 'main'
 
 const limitColor = (l: Limit) => {
   const p = l.percentUsed
@@ -28,44 +32,39 @@ const limitColor = (l: Limit) => {
   return p >= 50 ? 'warning' : 'success'
 }
 
-const agentProgress = (a: AgentRow, list: Task[], tick: number, width: number) => {
-  const owned = list.filter(t => t.owner !== undefined && t.owner === a.name)
-  if (owned.length > 0) {
-    const done = owned.filter(t => t.status === 'completed').length
-    const b = bar(a.status === 'completed' && done === 0 ? 1 : done / owned.length, width)
-    return { bar: b.filled + b.empty, label: `${done}/${owned.length}` }
-  }
-  if (a.status === 'running') return { bar: indeterminate(tick, width), label: `${a.toolCount} tools` }
-  const b = bar(1, width)
-  return { bar: b.filled, label: `${a.toolCount} tools` }
+type Row = {
+  key: string
+  name: string
+  isRunning: boolean
+  status: 'running' | 'completed' | 'failed' | 'killed' | 'idle'
+  current: string
+  toolCount: number
 }
 
-const mood = (r: { resume: unknown; running: number; busy: boolean; total?: number }): Mood => {
+/** A row's bar: its owned tasks when it has any, else a sweep while it works. */
+const progress = (row: Row, owned: Task[], tick: number, width: number) => {
+  if (owned.length > 0) {
+    const done = owned.filter(t => t.status === 'completed').length
+    const b = bar(done / owned.length, width)
+    return { filled: b.filled, empty: b.empty, label: `${done}/${owned.length}` }
+  }
+  if (row.isRunning) return { filled: indeterminate(tick, width), empty: '', label: `${row.toolCount} tools` }
+  if (row.status === 'idle') return { filled: '', empty: bar(0, width).empty, label: '' }
+  return { filled: bar(1, width).filled, empty: '', label: `${row.toolCount} tools` }
+}
+
+const pickMood = (r: { resume: unknown; running: number; busy: boolean; isDone: boolean }): Mood => {
   if (r.resume) return 'waiting'
   if (r.running > 0) return 'agents'
   if (r.busy) return 'working'
-  if (r.total === 1) return 'done'
+  if (r.isDone) return 'done'
   return 'idle'
-}
-
-const projectLines = (s: Stats) => {
-  const lines: string[] = []
-  if (s.isRepo) {
-    let first = s.branch ?? ''
-    if (s.ahead !== undefined) first += ` ↑${s.ahead} ↓${s.behind ?? 0}`
-    if (s.pushed !== undefined) first += ` · ${s.pushed} pushed, ${s.unpushed ?? 0} unpushed`
-    else if (s.commits !== undefined) first += ` · ${s.commits} commits (no upstream)`
-    lines.push(first)
-  } else {
-    lines.push('no git repo')
-  }
-  return lines
 }
 
 export const registerPane = (on: On) => {
   on('ui.render', { component: 'Pane', requestId: 'dashboard' }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const [taskList, agentList, limitList, s, tick, busy, queued] = await Promise.all([
+    const [taskList, agentList, limitList, s, tick, busy, queuedResume, mainRow, queuedCount] = await Promise.all([
       read($, tasks),
       read($, agents),
       read($, limits),
@@ -73,189 +72,191 @@ export const registerPane = (on: On) => {
       read($, frame),
       read($, isBusy),
       read($, resume),
+      read($, main),
+      read($, queued),
     ])
     const now = await $.clock.now()
-    const W = Math.max(20, e.props.bodyColumns)
+    const isInline = e.props.placement === 'inline'
+    // Dock: one column of padding each side.
+    const W = Math.max(20, e.props.bodyColumns - (isInline ? 0 : 2))
 
+    // ── Rows: the main thread first, then each subagent ──────────────────
+    const agentNames = new Set(agentList.map(a => a.name))
+    const rows: Row[] = [
+      {
+        key: MAIN,
+        name: MAIN,
+        isRunning: mainRow.phase === 'running',
+        status: mainRow.phase === 'running' ? 'running' : mainRow.phase === 'done' ? 'completed' : 'idle',
+        current: mainRow.phase === 'running' ? mainRow.current : mainRow.phase === 'done' ? 'waiting for you' : 'ready',
+        toolCount: mainRow.toolCount,
+      },
+      ...agentList.slice(-MAX_AGENT_ROWS).map(
+        (a): Row => ({
+          key: a.id,
+          name: a.name,
+          isRunning: a.status === 'running',
+          status: a.status,
+          current: a.current,
+          toolCount: a.toolCount,
+        }),
+      ),
+    ]
+    // Tasks no agent owns are the main thread's.
+    const ownedBy = (row: Row) =>
+      row.key === MAIN
+        ? taskList.filter(t => t.owner === undefined || t.owner === MAIN || !agentNames.has(t.owner))
+        : taskList.filter(t => t.owner === row.name)
+
+    // ── Total: always drawn ──────────────────────────────────────────────
     const done = taskList.filter(t => t.status === 'completed').length
     const running = agentList.filter(a => a.status === 'running').length
-    const total =
-      taskList.length > 0
-        ? done / taskList.length
-        : agentList.length > 0
-          ? (agentList.length - running) / agentList.length
-          : undefined
-    const m = mood({ resume: queued, running, busy, ...(total !== undefined && { total }) })
-    const pct = total === undefined ? undefined : Math.round(total * 100)
+    let total: { fraction?: number; label: string }
+    if (taskList.length > 0) total = { fraction: done / taskList.length, label: `${done}/${taskList.length} tasks` }
+    else if (agentList.length > 0 && (running > 0 || busy))
+      total = { fraction: (agentList.length - running) / agentList.length, label: `${agentList.length - running}/${agentList.length} agents` }
+    else if (busy) total = { label: 'working' }
+    else if (mainRow.phase === 'done') total = { fraction: 1, label: 'done' }
+    else total = { fraction: 0, label: 'ready' }
+    const pct = total.fraction === undefined ? undefined : Math.round(total.fraction * 100)
 
-    const cancelButton = queued && (
+    const isDone = !busy && running === 0 && (taskList.length > 0 ? done === taskList.length : mainRow.phase === 'done')
+    const m = pickMood({ resume: queuedResume, running, busy, isDone })
+
+    const statusLine = [
+      moodLabel(m),
+      running > 0 ? `${running} agent${running === 1 ? '' : 's'}` : '',
+      queuedCount > 0 ? `${queuedCount} queued` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ')
+
+    const totalBar = (width: number) => {
+      const b = total.fraction === undefined ? { filled: indeterminate(tick, width), empty: '' } : bar(total.fraction, width)
+      return (
+        <Text>
+          <Text color={ACCENT}>{b.filled}</Text>
+          <Text dimColor>{b.empty}</Text>
+          <Text bold> {pct === undefined ? '' : `${pct}% `}</Text>
+          <Text dimColor>{total.label}</Text>
+        </Text>
+      )
+    }
+
+    const cancelButton = queuedResume && (
       <Box>
         <Button key="cancel-resume" label="Cancel auto-resume" onPress={() => ctl.limits?.cancel()} />
       </Box>
     )
 
     // ── Inline: a few rows above the prompt ──────────────────────────────
-    if (e.props.placement === 'inline') {
-      const parts: string[] = []
-      if (pct !== undefined) {
-        const b = bar(total!, 12)
-        parts.push(`${b.filled}${b.empty} ${pct}%`)
-      }
-      if (running > 0) parts.push(`${running} agent${running === 1 ? '' : 's'}`)
-      for (const l of limitList) parts.push(`${limitLabel(l.kind)} ${Math.round(l.percentUsed)}%`)
+    if (isInline) {
+      const limitsText = limitList.map(l => `${limitLabel(l.kind)} ${Math.round(l.percentUsed)}%`).join(' · ')
       return (
         <Box flexDirection="column">
           <Text wrap="truncate-end">
-            <Text color={ACCENT}>{avatarGlyph(m, tick)} </Text>
-            <Text dimColor>{moodLabel(m)}</Text>
-            {parts.length > 0 && <Text> · {parts.join(' · ')}</Text>}
+            <Text color={ACCENT} bold>
+              {glyph(m, tick)} Claude{' '}
+            </Text>
+            <Text dimColor>{statusLine}</Text>
+            {limitsText !== '' && <Text dimColor> · {limitsText}</Text>}
           </Text>
-          {agentList
-            .filter(a => a.status === 'running')
-            .slice(0, 3)
-            .map(a => {
-              const p = agentProgress(a, taskList, tick, 8)
+          {totalBar(Math.max(8, Math.min(30, W - 20)))}
+          {rows
+            .filter(r => r.isRunning)
+            .slice(0, 4)
+            .map(r => {
+              const p = progress(r, ownedBy(r), tick, 8)
               return (
                 <Text wrap="truncate-end">
-                  <Text color={ACCENT}>{truncate(a.name, 10).padEnd(10)}</Text> {p.bar} {p.label.padEnd(8)}
-                  <Text dimColor>{a.current}</Text>
+                  <Text color={ACCENT}>{truncate(r.name, 8).padEnd(8)}</Text> {p.filled}
+                  <Text dimColor>{p.empty}</Text> <Text dimColor>{r.current}</Text>
                 </Text>
               )
             })}
-          {queued && (
-            <Text color="warning">⏸ Limit reached · auto-resume {resumeLabel(queued.at, now)}</Text>
-          )}
+          {queuedResume && <Text color="warning">⏸ Limit reached · auto-resume {resumeLabel(queuedResume.at, now)}</Text>}
           {cancelButton}
         </Box>
       )
     }
 
     // ── Dock: the full dashboard beside the chat ─────────────────────────
-    const rule = (title: string) => (
-      <Text dimColor>{`─ ${title} ${'─'.repeat(Math.max(0, W - title.length - 3))}`}</Text>
+    const section = (title: string) => (
+      <Text dimColor>{`── ${title} ${'─'.repeat(Math.max(0, W - title.length - 4))}`}</Text>
     )
-    const art = avatarFrame(m, tick, running)
-    const totalBarWidth = Math.max(5, W - 'Total '.length - ' 100%'.length)
-    const tb = bar(total ?? 0, totalBarWidth)
-
-    const nameWidth = Math.min(10, Math.max(4, ...agentList.map(a => a.name.length)))
-    const agentBarWidth = Math.max(5, Math.min(14, W - nameWidth - 12))
-
+    const nameWidth = Math.min(10, Math.max(4, ...rows.map(r => r.name.length)))
+    const rowBarWidth = Math.max(6, Math.min(24, W - nameWidth - 10))
     const shownTasks = taskList.slice(0, MAX_TASK_ROWS)
     const hiddenTasks = taskList.length - shownTasks.length
-
-    const limitBarWidth = Math.max(5, Math.min(30, W - 10))
+    const limitBarWidth = Math.max(6, Math.min(36, W - 9))
 
     return (
-      <Box flexDirection="column">
-        <Box flexDirection="row">
-          <Box flexDirection="column" width={8}>
-            {art.map(row => (
-              <Text color={ACCENT}>{row}</Text>
-            ))}
-          </Box>
-          <Box flexDirection="column" marginLeft={1}>
-            <Text bold>{moodLabel(m)}</Text>
-            <Text dimColor>
-              {running > 0 ? `${running} agent${running === 1 ? '' : 's'} running` : agentList.length > 0 ? `${agentList.length} agents finished` : 'no agents'}
+      <Box flexDirection="column" paddingX={1} paddingTop={1}>
+        {/* Header: the banner, then what is going on */}
+        <Box flexDirection="column">
+          {banner(m, tick, W).map(r => (
+            <Text>
+              <Text color={ACCENT} dimColor={r.isDim}>
+                {r.before}
+              </Text>
+              <Text color="text" bold>
+                {r.lit}
+              </Text>
+              <Text color={ACCENT} dimColor={r.isDim}>
+                {r.after}
+              </Text>
             </Text>
-            <Text dimColor>{taskList.length > 0 ? `${done}/${taskList.length} tasks done` : 'no task list'}</Text>
+          ))}
+          <Box marginTop={1}>
+            <Text wrap="truncate-end">
+              <Text color={ACCENT} bold>
+                {glyph(m, tick)}{' '}
+              </Text>
+              <Text bold>{statusLine}</Text>
+            </Text>
           </Box>
         </Box>
 
-        {pct !== undefined && (
-          <Text>
-            Total <Text color={ACCENT}>{tb.filled}</Text>
-            <Text dimColor>{tb.empty}</Text> {String(pct).padStart(3)}%
-          </Text>
-        )}
+        {/* Total progress */}
+        <Box flexDirection="column" marginTop={1}>
+          {section('progress')}
+          <Box marginTop={1}>{totalBar(Math.max(8, W - 18))}</Box>
+        </Box>
 
-        {queued && (
+        {queuedResume && (
           <Box flexDirection="column" marginTop={1}>
             <Text color="warning">⏸ Limit reached. Auto-resume at</Text>
-            <Text color="warning">  {resumeLabel(queued.at, now)}</Text>
+            <Text color="warning">  {resumeLabel(queuedResume.at, now)}</Text>
             {cancelButton}
           </Box>
         )}
 
-        {agentList.length > 0 && (
-          <Box flexDirection="column" marginTop={1}>
-            {rule('agents')}
-            {agentList.slice(-MAX_AGENT_ROWS).map(a => {
-              const p = agentProgress(a, taskList, tick, agentBarWidth)
-              const isRunning = a.status === 'running'
-              const mark = a.status === 'completed' ? '✔' : a.status === 'running' ? '' : '✗'
-              return (
-                <Box flexDirection="column">
-                  <Text wrap="truncate-end" dimColor={!isRunning}>
-                    <Text color={isRunning ? ACCENT : undefined}>{truncate(a.name, nameWidth).padEnd(nameWidth)}</Text>{' '}
-                    <Text color={a.status === 'failed' || a.status === 'killed' ? 'error' : isRunning ? ACCENT : 'success'}>
-                      {p.bar}
-                    </Text>{' '}
-                    {p.label} {mark}
-                  </Text>
-                  {isRunning && a.current !== '' && (
-                    <Text dimColor wrap="truncate-end">
-                      {'  ↳ '}
-                      {a.current}
-                    </Text>
-                  )}
-                </Box>
-              )
-            })}
-          </Box>
-        )}
-
-        {taskList.length > 0 && (
-          <Box flexDirection="column" marginTop={1}>
-            {rule('tasks')}
-            {shownTasks.map(t => {
-              const owner = t.owner ? ` (${t.owner})` : ''
-              if (t.status === 'completed') {
-                return (
-                  <Text wrap="truncate-end" dimColor>
-                    <Text color="success">✔</Text> {t.subject}
-                    {owner}
-                  </Text>
-                )
-              }
-              if (t.status === 'in_progress') {
-                return (
-                  <Text wrap="truncate-end">
-                    <Text color={ACCENT}>◐</Text> {t.activeForm ?? t.subject}
-                    <Text dimColor>{owner}</Text>
-                  </Text>
-                )
-              }
-              return (
-                <Text wrap="truncate-end">
-                  <Text dimColor>○</Text> {t.subject}
-                  <Text dimColor>{owner}</Text>
-                </Text>
-              )
-            })}
-            {hiddenTasks > 0 && <Text dimColor>  +{hiddenTasks} more</Text>}
-          </Box>
-        )}
-
+        {/* Agents, the main thread first */}
         <Box flexDirection="column" marginTop={1}>
-          {rule('limits')}
-          {limitList.length === 0 && <Text dimColor>no rate-limit reading yet</Text>}
-          {limitList.map(l => {
-            const isReset = l.resetsAt !== undefined && l.resetsAt <= now
-            const p = isReset ? 0 : Math.round(Math.min(100, Math.max(0, l.percentUsed)))
-            const b = bar(p / 100, limitBarWidth)
+          {section('agents')}
+          {rows.map(r => {
+            const p = progress(r, ownedBy(r), tick, rowBarWidth)
+            const isBad = r.status === 'failed' || r.status === 'killed'
+            const mark = r.status === 'completed' && r.key !== MAIN ? ' ✔' : isBad ? ' ✗' : ''
+            const barColor = isBad ? 'error' : r.isRunning ? ACCENT : 'success'
             return (
-              <Box flexDirection="column">
-                <Text>
-                  {limitLabel(l.kind).padEnd(3)}
-                  <Text color={limitColor({ ...l, percentUsed: p })}>{b.filled}</Text>
-                  <Text dimColor>{b.empty}</Text> {String(p).padStart(3)}%
+              <Box flexDirection="column" marginTop={1}>
+                <Text wrap="truncate-end">
+                  <Text color={r.isRunning ? ACCENT : undefined} bold={r.isRunning} dimColor={!r.isRunning}>
+                    {truncate(r.name, nameWidth).padEnd(nameWidth)}
+                  </Text>{' '}
+                  <Text color={barColor}>{p.filled}</Text>
+                  <Text dimColor>{p.empty}</Text>
+                  <Text dimColor>
+                    {' '}
+                    {p.label}
+                    {mark}
+                  </Text>
                 </Text>
-                {l.resetsAt !== undefined && (
-                  <Text dimColor wrap="truncate-end">
-                    {'   '}
-                    {isReset ? 'reset — waiting for a new reading' : `resets ${formatReset(l.resetsAt, now, l.kind !== 'five_hour')}`}
+                {r.current !== '' && (
+                  <Text dimColor={!r.isRunning} wrap="truncate-end">
+                    <Text dimColor>{'  ↳ '}</Text>
+                    {r.current}
                   </Text>
                 )}
               </Box>
@@ -263,16 +264,92 @@ export const registerPane = (on: On) => {
           })}
         </Box>
 
+        {taskList.length > 0 && (
+          <Box flexDirection="column" marginTop={1}>
+            {section('tasks')}
+            <Box flexDirection="column" marginTop={1}>
+              {shownTasks.map(t => {
+                const owner = t.owner && t.owner !== MAIN ? ` (${t.owner})` : ''
+                if (t.status === 'completed') {
+                  return (
+                    <Text wrap="truncate-end" dimColor>
+                      <Text color="success">✔</Text> {t.subject}
+                      {owner}
+                    </Text>
+                  )
+                }
+                if (t.status === 'in_progress') {
+                  return (
+                    <Text wrap="truncate-end">
+                      <Text color={ACCENT}>◐</Text> <Text bold>{t.activeForm ?? t.subject}</Text>
+                      <Text dimColor>{owner}</Text>
+                    </Text>
+                  )
+                }
+                return (
+                  <Text wrap="truncate-end">
+                    <Text dimColor>○</Text> {t.subject}
+                    <Text dimColor>{owner}</Text>
+                  </Text>
+                )
+              })}
+              {hiddenTasks > 0 && <Text dimColor>  +{hiddenTasks} more</Text>}
+            </Box>
+          </Box>
+        )}
+
         <Box flexDirection="column" marginTop={1}>
-          {rule('project')}
-          {projectLines(s).map(line => (
-            <Text wrap="truncate-end">{line}</Text>
-          ))}
-          <Text wrap="truncate-end">
-            <Text color="success">+{s.added}</Text> <Text color="error">-{s.removed}</Text>
-            <Text dimColor> uncommitted</Text>
-            {s.codeLines !== undefined && <Text> · {thousands(s.codeLines)} lines of code</Text>}
-          </Text>
+          {section('limits')}
+          {limitList.length === 0 && (
+            <Box marginTop={1}>
+              <Text dimColor>no rate-limit reading yet</Text>
+            </Box>
+          )}
+          {limitList.map(l => {
+            const isReset = l.resetsAt !== undefined && l.resetsAt <= now
+            const p = isReset ? 0 : Math.round(Math.min(100, Math.max(0, l.percentUsed)))
+            const b = bar(p / 100, limitBarWidth)
+            return (
+              <Box flexDirection="column" marginTop={1}>
+                <Text>
+                  <Text bold>{limitLabel(l.kind).padEnd(3)}</Text>
+                  <Text color={limitColor({ ...l, percentUsed: p })}>{b.filled}</Text>
+                  <Text dimColor>{b.empty}</Text> {String(p).padStart(3)}%
+                </Text>
+                {l.resetsAt !== undefined && (
+                  <Text dimColor wrap="truncate-end">
+                    {'   '}
+                    {isReset ? 'reset, waiting for a new reading' : `resets ${formatReset(l.resetsAt, now, l.kind !== 'five_hour')}`}
+                  </Text>
+                )}
+              </Box>
+            )
+          })}
+        </Box>
+
+        <Box flexDirection="column" marginTop={1} marginBottom={1}>
+          {section('project')}
+          <Box flexDirection="column" marginTop={1}>
+            {s.isRepo ? (
+              <Text wrap="truncate-end">
+                <Text bold>{s.branch}</Text>
+                {s.ahead !== undefined && <Text dimColor>{` ↑${s.ahead} ↓${s.behind ?? 0}`}</Text>}
+              </Text>
+            ) : (
+              <Text dimColor>no git repo</Text>
+            )}
+            {s.pushed !== undefined && (
+              <Text dimColor wrap="truncate-end">
+                {s.pushed} pushed · {s.unpushed ?? 0} unpushed
+              </Text>
+            )}
+            {s.commits !== undefined && <Text dimColor>{s.commits} commits (no upstream)</Text>}
+            <Text wrap="truncate-end">
+              <Text color="success">+{s.added}</Text> <Text color="error">-{s.removed}</Text>
+              <Text dimColor> uncommitted</Text>
+            </Text>
+            {s.codeLines !== undefined && <Text dimColor>{thousands(s.codeLines)} lines of code</Text>}
+          </Box>
         </Box>
       </Box>
     )

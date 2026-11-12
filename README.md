@@ -7,12 +7,14 @@ conversation on the left and the dashboard on the right. This needs the
 fullscreen layout and at least 110 columns. Narrower terminals show a compact
 version above the prompt instead.
 
-- **Avatar**: an animated ASCII Claude spark that shows what's happening:
-  idle, working, agents at work, waiting for a limit reset, or all done.
-- **Total progress**: completed tasks out of all tasks.
-- **Agents**: one row per subagent with a progress bar (its owned tasks done
-  out of its owned tasks, or a sliding bar if it owns none) and what it's
-  doing right now (`↳ Edit auth.ts`).
+- **Header**: a big block-letter CLAUDE banner with a light sweeping across
+  it, with motion that changes for idle, working, agents at work, waiting for
+  a limit reset, and all done.
+- **Progress**: always shown: completed tasks out of all tasks, a sweep while
+  work has no task list, and 100% when a turn finishes.
+- **Agents**: the main thread first, then one row per subagent, each with a
+  progress bar (its owned tasks done out of its owned tasks, or a sliding bar
+  if it owns none) and what it's doing right now (`↳ Edit auth.ts`).
 - **Tasks**: the live task list (✔ done, ◐ in progress, ○ pending), with
   owners.
 - **Limits**: the 5h/7d rate-limit bars with reset times. Readings are synced
@@ -21,9 +23,12 @@ version above the prompt instead.
 - **Project**: branch, ahead/behind, pushed/unpushed, uncommitted +/− lines,
   and total lines of code.
 
-Every chat gets a system-prompt section telling Claude to make a task list
-and spawn named parallel agents for big changes (3+ files, several areas, or
-4+ steps), and to just do small changes directly. When a turn dies with a
+Every chat gets a system-prompt section telling Claude to keep a task list
+for anything that takes more than one step, and to spawn named parallel
+agents for big changes (3+ files, several areas, or 4+ steps). If you queue
+3 or more messages while Claude is working, it's told to pause at a safe
+point, fold the remaining work and every queued request into the task list,
+and spin up agents for the parts that can run in parallel. When a turn dies with a
 rate-limit window at 100%, the mod queues the work and sends a resume prompt
 once the limit resets (the terminal must stay open). Typing anything cancels
 the queued resume, and so does the **Cancel auto-resume** button.

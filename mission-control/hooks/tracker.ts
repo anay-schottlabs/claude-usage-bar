@@ -1,15 +1,20 @@
 import { atom, read, update } from 'claude-code'
 import type { On } from 'claude-code'
 
-import type { AgentRow, AgentStatus, Resume, Task, TaskStatus } from '../types'
+import type { AgentRow, AgentStatus, MainRow, Resume, Task, TaskStatus } from '../types'
 import { describeCall } from './format'
 import { ctl } from './controllers'
+import { queueContext, QUEUE_THRESHOLD } from './instructions'
 
 // Each module names the atoms it touches (the scan reads them per module).
 const agents = atom({ plugin: 'mission-control', key: 'agents' } as const, [] as AgentRow[], { shape: 'agents-1' })
 const isBusy = atom({ plugin: 'mission-control', key: 'isBusy' } as const, false)
 const resume = atom({ plugin: 'mission-control', key: 'resume' } as const, null as Resume | null, { shape: 'resume-1' })
 const tasks = atom({ plugin: 'mission-control', key: 'tasks' } as const, [] as Task[], { shape: 'tasks-1' })
+const main = atom({ plugin: 'mission-control', key: 'main' } as const, { phase: 'idle', current: '', toolCount: 0 } as MainRow, {
+  shape: 'main-1',
+})
+const queued = atom({ plugin: 'mission-control', key: 'queued' } as const, 0)
 
 const isDenied = (out: unknown) =>
   typeof out === 'object' && out !== null && 'deny' in out && (out as { deny?: unknown }).deny !== undefined
@@ -111,9 +116,11 @@ export const registerTracker = (on: On, afterToolCall?: (tool: string) => void) 
 
   // Every tool call: what a subagent is doing now, and the caller's after-hook.
   on('tool.call', async ($, e, next) => {
+    const current = describeCall(e.tool, e as unknown as Record<string, unknown>)
     if (e.agentId !== undefined) {
-      const current = describeCall(e.tool, e as unknown as Record<string, unknown>)
       await update($, agents, patchAgent(e.agentId, row => ({ ...row, current, toolCount: row.toolCount + 1 })))
+    } else {
+      await update($, main, (row): MainRow => ({ ...row, phase: 'running', current, toolCount: row.toolCount + 1 }))
     }
     const out = await next(e)
     afterToolCall?.(e.tool)
@@ -121,8 +128,10 @@ export const registerTracker = (on: On, afterToolCall?: (tool: string) => void) 
   })
 
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) await update($, isBusy, () => true)
-    else await update($, agents, patchAgent(e.agentId, row => ({ ...row, status: 'running' })))
+    if (e.agentId === undefined) {
+      await update($, isBusy, () => true)
+      await update($, main, (row): MainRow => ({ phase: 'running', current: 'thinking…', toolCount: row.phase === 'done' ? 0 : row.toolCount }))
+    } else await update($, agents, patchAgent(e.agentId, row => ({ ...row, status: 'running' })))
     return next(e)
   })
 
@@ -130,6 +139,8 @@ export const registerTracker = (on: On, afterToolCall?: (tool: string) => void) 
     const out = await next(e)
     if (e.agentId === undefined) {
       await update($, isBusy, () => false)
+      await update($, queued, () => 0)
+      await update($, main, (row): MainRow => ({ ...row, phase: e.reason === 'answer' ? 'done' : 'idle', current: '' }))
       // A main-loop turn that died with a window at 100% queues the work for the reset.
       if (e.reason === 'error') await ctl.limits?.onTurnError()
     } else {
@@ -139,14 +150,25 @@ export const registerTracker = (on: On, afterToolCall?: (tool: string) => void) 
     return out
   })
 
-  // A new piece of work typed by the person clears what already finished.
   on('prompt.submit', async ($, e, next) => {
-    if (e.origin?.kind === 'composer' && e.command === undefined) {
-      // The person typing something takes over from a queued resume.
-      if ((await read($, resume)) !== null) await ctl.limits?.cancel()
-      await update($, agents, list => list.filter(a => !isFinished(a.status)))
-      await update($, tasks, list => (list.length > 0 && list.every(t => t.status === 'completed') ? [] : list))
+    if (e.origin?.kind !== 'composer' || e.command !== undefined) return next(e)
+    // The person typing something takes over from a queued resume.
+    if ((await read($, resume)) !== null) await ctl.limits?.cancel()
+
+    if (e.turnId !== undefined && (await read($, isBusy))) {
+      // Typed over a running turn: once the queue piles up, Claude is told to
+      // pause and fold everything into the task list and agents.
+      const count = await update($, queued, n => n + 1)
+      if (count >= QUEUE_THRESHOLD) {
+        if (count === QUEUE_THRESHOLD) $.ui.toast(`Mission Control: ${count} messages queued, reorganising into tasks`)
+        return next({ ...e, context: [...(e.context ?? []), queueContext(count)] })
+      }
+      return next(e)
     }
+
+    // A new piece of work clears what already finished.
+    await update($, agents, list => list.filter(a => !isFinished(a.status)))
+    await update($, tasks, list => (list.length > 0 && list.every(t => t.status === 'completed') ? [] : list))
     return next(e)
   })
 }

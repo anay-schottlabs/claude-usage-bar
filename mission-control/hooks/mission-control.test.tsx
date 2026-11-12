@@ -22,7 +22,10 @@ const pane = (placement: 'dock' | 'inline') =>
 type Usage = { kind: string; percentUsed: number; resetsAt?: string }[]
 
 /** The engine beneath the mod: every call it makes answered from memory. */
-const engine = (on: On, opts: { usage?: () => Usage; submitted?: string[] } = {}) => {
+const engine = (
+  on: On,
+  opts: { usage?: () => Usage; submitted?: string[]; contexts?: (readonly string[] | undefined)[] } = {},
+) => {
   const clock = mock.clock(on, { now: T0 })
   mock.store(on)
   on('command.register', () => ({ value: { command: 'mission' } }))
@@ -39,6 +42,7 @@ const engine = (on: On, opts: { usage?: () => Usage; submitted?: string[] } = {}
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.submit', (_, e) => {
     opts.submitted?.push(e.text)
+    opts.contexts?.push(e.context)
     return { text: e.text }
   })
   return clock
@@ -59,10 +63,9 @@ test('the task list and total bar follow TaskCreate and TaskUpdate', async ($, o
   await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'in_progress', owner: 'api' })
 
   const ui = await $.ui.mount(pane('dock'))
-  expect((await ui.find({ type: 'Text', text: /^Total/ }))?.text).toMatch(/50%$/)
+  expect(await ui.find({ type: 'Text', text: /50% 1\/2 tasks$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /✔ Extract types/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /◐ Migrating API \(api\)/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /1\/2 tasks done/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -79,7 +82,7 @@ test('a spawned agent shows its bar and what it is doing now', async ($, on) => 
   const ui = await $.ui.mount(pane('dock'))
   expect(await ui.find({ type: 'Text', text: /^api .*1 tools/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /↳ Edit auth\.ts/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /1 agent running/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /agents at work · 1 agent$/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -157,4 +160,47 @@ test('every chat gets the workflow instructions', async ($, on) => {
   })
   const ids = out.sections.map(s => s.id)
   expect(ids).toEqual(['intro', 'mission-control:workflow'])
+})
+
+test('the main thread is the first agent row, and the total bar always shows', async ($, on) => {
+  engine(on)
+  on('tool.call', () => ({ result: {} }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await $.session.start(START)
+
+  // Before any work: main is ready and the bar reads 0%.
+  let ui = await $.ui.mount(pane('dock'))
+  expect(await ui.find({ type: 'Text', text: /^main .*$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /↳ ready/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /0% ready$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /no agents/ })).toBeUndefined()
+  await ui.unmount()
+
+  // During a turn: main shows what it is doing.
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.tool.call({ tool: 'Bash', command: 'npm test' })
+  ui = await $.ui.mount(pane('dock'))
+  expect(await ui.find({ type: 'Text', text: /↳ Bash npm test/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /working$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('queuing three prompts mid-turn tells Claude to reorganise into tasks and agents', async ($, on) => {
+  const contexts: (readonly string[] | undefined)[] = []
+  engine(on, { contexts })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await $.session.start(START)
+  await $.turn.start({ text: 'first', turnId: 't1' })
+
+  for (const text of ['one', 'two', 'three', 'four']) {
+    await $.prompt.submit({ text, turnId: 't1', origin: { kind: 'composer' } } as never)
+  }
+  expect(contexts[0]).toBeUndefined()
+  expect(contexts[1]).toBeUndefined()
+  expect(contexts[2]?.join(' ')).toContain('queued 3 messages')
+  expect(contexts[3]?.join(' ')).toContain('add it to the task list')
+
+  const ui = await $.ui.mount(pane('dock'))
+  expect(await ui.find({ type: 'Text', text: /4 queued/ })).toBeDefined()
+  await ui.unmount()
 })
