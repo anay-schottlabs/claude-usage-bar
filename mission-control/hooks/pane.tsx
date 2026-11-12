@@ -23,9 +23,9 @@ const MAX_AGENT_ROWS = 8
 
 const limitColor = (l: Limit) => {
   const p = l.percentUsed
-  if (p >= 80) return 'red'
-  if (l.kind === 'seven_day') return p >= 50 ? 'magenta' : 'cyan'
-  return p >= 50 ? 'yellow' : 'green'
+  if (p >= 80) return 'error'
+  if (l.kind === 'seven_day') return p >= 50 ? 'merged' : 'suggestion'
+  return p >= 50 ? 'warning' : 'success'
 }
 
 const agentProgress = (a: AgentRow, list: Task[], tick: number, width: number) => {
@@ -123,7 +123,7 @@ export const registerPane = (on: On) => {
               )
             })}
           {queued && (
-            <Text color="yellow">⏸ Limit reached · auto-resume {resumeLabel(queued.at, now)}</Text>
+            <Text color="warning">⏸ Limit reached · auto-resume {resumeLabel(queued.at, now)}</Text>
           )}
           {cancelButton}
         </Box>
@@ -172,8 +172,8 @@ export const registerPane = (on: On) => {
 
         {queued && (
           <Box flexDirection="column" marginTop={1}>
-            <Text color="yellow">⏸ Limit reached. Auto-resume at</Text>
-            <Text color="yellow">  {resumeLabel(queued.at, now)}</Text>
+            <Text color="warning">⏸ Limit reached. Auto-resume at</Text>
+            <Text color="warning">  {resumeLabel(queued.at, now)}</Text>
             {cancelButton}
           </Box>
         )}
@@ -189,7 +189,7 @@ export const registerPane = (on: On) => {
                 <Box flexDirection="column">
                   <Text wrap="truncate-end" dimColor={!isRunning}>
                     <Text color={isRunning ? ACCENT : undefined}>{truncate(a.name, nameWidth).padEnd(nameWidth)}</Text>{' '}
-                    <Text color={a.status === 'failed' || a.status === 'killed' ? 'red' : isRunning ? ACCENT : 'green'}>
+                    <Text color={a.status === 'failed' || a.status === 'killed' ? 'error' : isRunning ? ACCENT : 'success'}>
                       {p.bar}
                     </Text>{' '}
                     {p.label} {mark}
@@ -214,7 +214,7 @@ export const registerPane = (on: On) => {
               if (t.status === 'completed') {
                 return (
                   <Text wrap="truncate-end" dimColor>
-                    <Text color="green">✔</Text> {t.subject}
+                    <Text color="success">✔</Text> {t.subject}
                     {owner}
                   </Text>
                 )
@@ -269,7 +269,7 @@ export const registerPane = (on: On) => {
             <Text wrap="truncate-end">{line}</Text>
           ))}
           <Text wrap="truncate-end">
-            <Text color="green">+{s.added}</Text> <Text color="red">-{s.removed}</Text>
+            <Text color="success">+{s.added}</Text> <Text color="error">-{s.removed}</Text>
             <Text dimColor> uncommitted</Text>
             {s.codeLines !== undefined && <Text> · {thousands(s.codeLines)} lines of code</Text>}
           </Text>

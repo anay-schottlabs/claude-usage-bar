@@ -2,7 +2,8 @@
 
 export type Mood = 'idle' | 'working' | 'agents' | 'waiting' | 'done'
 
-export const ACCENT = '#D97757'
+// Theme keys, so the dashboard follows the person's Claude Code theme.
+export const ACCENT = 'claude'
 
 const PLUS = ['   |   ', ' --✻-- ', '   |   ']
 const CROSS = [' \\   / ', '   ✻   ', ' /   \\ ']
