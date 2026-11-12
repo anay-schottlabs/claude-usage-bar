@@ -218,7 +218,7 @@ export const registerPane = (on: On) => {
               <Text color={r.color} dimColor={r.isDim}>
                 {r.before}
               </Text>
-              <Text color="text" bold>
+              <Text color={r.litColor} bold>
                 {r.lit}
               </Text>
               <Text color={r.color} dimColor={r.isDim}>

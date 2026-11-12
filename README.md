@@ -8,7 +8,8 @@ fullscreen layout and at least 110 columns. Narrower terminals show a compact
 version above the prompt instead.
 
 - **Header**: a big block-letter CLAUDE banner with a light shining across
-  it: gray when idle, Claude's color while work is running.
+  it from left to right: gray with a white shine when idle, Claude's color
+  with a lighter shimmer while work is running.
 - **Progress**: a bar that only grows. Before starting, Claude (and each
   subagent) forecasts checkpoints with time estimates using the mod's
   `progress_plan` tool, then reports each one with `progress_checkpoint`.

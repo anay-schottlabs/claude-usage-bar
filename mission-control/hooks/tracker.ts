@@ -107,9 +107,7 @@ export const registerTracker = (on: On, afterToolCall?: (tool: string) => void) 
     const plan = all[key]!
     const secs = plan.checkpoints.reduce((n, c) => n + c.seconds, 0)
     return {
-      result: {
-        message: `Plan recorded: ${plan.checkpoints.length} checkpoints, about ${Math.round(secs / 60)} min. Call ${CHECKPOINT_TOOL_FULL} as each one is reached.`,
-      },
+      result: `Plan recorded: ${plan.checkpoints.length} checkpoints, about ${Math.round(secs / 60)} min. Call ${CHECKPOINT_TOOL_FULL} as each one is reached.`,
     }
   })
 
@@ -117,14 +115,10 @@ export const registerTracker = (on: On, afterToolCall?: (tool: string) => void) 
     const key = e.agentId ?? MAIN
     const now = await $.clock.now()
     const prev = (await read($, plans))[key]
-    if (!prev) return { result: { message: `No plan yet: call ${PLAN_TOOL_FULL} first.` } }
+    if (!prev) return { result: `No plan yet: call ${PLAN_TOOL_FULL} first.` }
     const all = await update($, plans, list => withPlan(list, key, applyCheckpoint(list[key] ?? prev, now)))
     const plan = all[key]!
-    return {
-      result: {
-        message: plan.isComplete ? 'All checkpoints reached.' : `Checkpoint reached (${planLabel(plan)} next).`,
-      },
-    }
+    return { result: plan.isComplete ? 'All checkpoints reached.' : `Checkpoint reached (${planLabel(plan)} next).` }
   })
 
   // The mod's own bookkeeping tools never need the person's approval.

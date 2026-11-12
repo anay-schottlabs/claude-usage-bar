@@ -35,36 +35,41 @@ const SMALL_ROWS = spell(SMALL, 'CLAUDE')
 export const BANNER_WIDTH = BIG_ROWS[0]!.length
 
 /** One row of the banner split around the bright band, and its base color. */
-export type BannerRow = { before: string; lit: string; after: string; isDim: boolean; color: string }
+export type BannerRow = { before: string; lit: string; after: string; isDim: boolean; color: string; litColor: string }
 
 /** Gray at rest; Claude's color while anything works. */
 const IDLE_COLOR = 'inactive'
+/** The shine: white over gray; Claude's lighter shimmer shade over its color. */
+const IDLE_SHINE = 'text'
+const WORKING_SHINE = 'claudeShimmer'
 
 const BAND = 4
 
 /**
- * The banner for a mood at a frame: a bright band shines diagonally across
- * the letters. Idle, the letters are gray with a slow shine; working, they
- * are Claude's color with a quicker one (quicker still with agents); done,
- * they glow whole; waiting for a limit reset, they sleep gray and dim.
+ * The banner for a mood at a frame: a bright band shines across the letters
+ * from left to right, then rests before the next pass. Idle (and done), the
+ * letters are gray with a slow shine; working, they are Claude's color with
+ * a quicker one; waiting for a limit reset, they sleep gray and dim.
  */
 export const banner = (mood: Mood, tick: number, width: number): BannerRow[] => {
   const rows = width >= BANNER_WIDTH ? BIG_ROWS : SMALL_ROWS
   const w = rows[0]!.length
-  const cycle = w + rows.length + BAND * 2 + 8
-  const speed = mood === 'agents' ? 3 : 2
-  const head = ((tick * speed) % cycle) - BAND
+  const isWorking = mood === 'working' || mood === 'agents'
+  const color = isWorking ? ACCENT : IDLE_COLOR
+  // Columns per tick, and a rest after each pass so it reads as a shine.
+  const speed = mood === 'agents' ? 3 : isWorking ? 2 : 1
+  const cycle = w + rows.length + BAND + (isWorking ? 12 : 30)
+  const head = (tick * speed) % cycle
 
-  const color = mood === 'idle' || mood === 'waiting' ? IDLE_COLOR : ACCENT
   return rows.map((row, r) => {
-    const plain = { before: row, lit: '', after: '', isDim: false, color }
+    const plain = { before: row, lit: '', after: '', isDim: false, color, litColor: isWorking ? WORKING_SHINE : IDLE_SHINE }
     if (mood === 'waiting') return { ...plain, isDim: true }
-    if (mood === 'done') return tick % 8 < 4 ? { ...plain, before: '', lit: row } : plain
-    if (mood === 'idle' && (tick * 2) % (w + 20) >= w) return plain
-    // A diagonal: lower rows lag a column per row.
-    const start = Math.max(0, Math.min(w, (mood === 'idle' ? (tick * 2) % (w + 20) : head) - r))
-    const end = Math.max(0, Math.min(w, start + BAND))
-    return { ...plain, before: row.slice(0, start), lit: row.slice(start, end), after: row.slice(end) }
+    // A slight diagonal: lower rows trail by a column each.
+    const start = head - r
+    if (start >= w || start + BAND <= 0) return plain
+    const a = Math.max(0, start)
+    const b = Math.min(w, start + BAND)
+    return { ...plain, before: row.slice(0, a), lit: row.slice(a, b), after: row.slice(b) }
   })
 }
 

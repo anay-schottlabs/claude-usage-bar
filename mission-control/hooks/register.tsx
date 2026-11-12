@@ -20,6 +20,10 @@ const limits = atom({ plugin: 'mission-control', key: 'limits' } as const, [] as
 const resume = atom({ plugin: 'mission-control', key: 'resume' } as const, null as Resume | null, { shape: 'resume-1' })
 const stats = atom({ plugin: 'mission-control', key: 'stats' } as const, { added: 0, removed: 0, isRepo: false } as Stats, { shape: 'stats-1' })
 
+// Transparent: the terminal's own background shows through. 52 columns fit the
+// banner (47) with the pane's padding.
+const PANE_OPEN = { id: PANE, title: TITLE, backgroundColor: 'transparent', columns: 52 } as const
+
 const TICK_MS = 150
 const LIMIT_SYNC_TICKS = Math.round(5000 / TICK_MS)
 const STATS_TICKS = Math.round(30000 / TICK_MS)
@@ -80,7 +84,7 @@ export const register: Register = on => {
       description: 'Open the Mission Control dashboard beside the chat',
       argumentHint: '[test-resume <seconds> | cancel-resume]',
     })
-    void $.ui.open({ id: PANE, title: TITLE })
+    void $.ui.open(PANE_OPEN)
 
     const usage = await $.session.usage()
     await ctl.limits.apply(usage.rateLimits.map(toLimit))
@@ -118,14 +122,14 @@ export const register: Register = on => {
     if (sub === 'test-resume' && ctl.limits) {
       const secs = Math.max(5, parseInt(arg ?? '60', 10) || 60)
       await ctl.limits.arm((await $.clock.now()) + secs * 1000, 'five_hour')
-      await $.ui.open({ id: PANE, title: TITLE })
+      await $.ui.open(PANE_OPEN)
       return { text: `Mission Control: simulated limit; auto-resume fires in ${secs}s (it checks the real limits first).` }
     }
     if (sub === 'cancel-resume' && ctl.limits) {
       await ctl.limits.cancel()
       return { text: 'Mission Control: auto-resume cancelled.' }
     }
-    const opened = await $.ui.open({ id: PANE, title: TITLE })
+    const opened = await $.ui.open(PANE_OPEN)
     return {
       text: opened.isPlaced ? 'Mission Control opened.' : `Mission Control is open but not drawn: ${opened.reason}`,
     }
