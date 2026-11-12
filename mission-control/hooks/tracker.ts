@@ -1,10 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { On } from 'claude-code'
 
-import type { AgentRow, AgentStatus, MainRow, Resume, Task, TaskStatus } from '../types'
+import type { AgentRow, AgentStatus, MainRow, Plan, Resume, Task, TaskStatus } from '../types'
 import { describeCall } from './format'
 import { ctl } from './controllers'
 import { queueContext, QUEUE_THRESHOLD } from './instructions'
+import { applyCheckpoint, applyPlan, CHECKPOINT_TOOL_FULL, completePlan, planLabel, PLAN_TOOL_FULL } from './progress'
 
 // Each module names the atoms it touches (the scan reads them per module).
 const agents = atom({ plugin: 'mission-control', key: 'agents' } as const, [] as AgentRow[], { shape: 'agents-1' })
@@ -15,6 +16,15 @@ const main = atom({ plugin: 'mission-control', key: 'main' } as const, { phase: 
   shape: 'main-1',
 })
 const queued = atom({ plugin: 'mission-control', key: 'queued' } as const, 0)
+const plans = atom({ plugin: 'mission-control', key: 'plans' } as const, {} as Record<string, Plan>, { shape: 'plans-1' })
+
+const MAIN = 'main'
+const withPlan = (all: Record<string, Plan>, key: string, plan: Plan | undefined) => {
+  const next = { ...all }
+  if (plan) next[key] = plan
+  else delete next[key]
+  return next
+}
 
 const isDenied = (out: unknown) =>
   typeof out === 'object' && out !== null && 'deny' in out && (out as { deny?: unknown }).deny !== undefined
@@ -89,6 +99,38 @@ export const registerTracker = (on: On, afterToolCall?: (tool: string) => void) 
     return out
   })
 
+  // ── Progress plans: the mod's own tools, answered here ────────────────
+  on('tool.call', { tool: 'mcp__mission-control__progress_plan' }, async ($, e) => {
+    const key = e.agentId ?? MAIN
+    const now = await $.clock.now()
+    const all = await update($, plans, list => withPlan(list, key, applyPlan(list[key], e as never, now)))
+    const plan = all[key]!
+    const secs = plan.checkpoints.reduce((n, c) => n + c.seconds, 0)
+    return {
+      result: {
+        message: `Plan recorded: ${plan.checkpoints.length} checkpoints, about ${Math.round(secs / 60)} min. Call ${CHECKPOINT_TOOL_FULL} as each one is reached.`,
+      },
+    }
+  })
+
+  on('tool.call', { tool: 'mcp__mission-control__progress_checkpoint' }, async ($, e) => {
+    const key = e.agentId ?? MAIN
+    const now = await $.clock.now()
+    const prev = (await read($, plans))[key]
+    if (!prev) return { result: { message: `No plan yet: call ${PLAN_TOOL_FULL} first.` } }
+    const all = await update($, plans, list => withPlan(list, key, applyCheckpoint(list[key] ?? prev, now)))
+    const plan = all[key]!
+    return {
+      result: {
+        message: plan.isComplete ? 'All checkpoints reached.' : `Checkpoint reached (${planLabel(plan)} next).`,
+      },
+    }
+  })
+
+  // The mod's own bookkeeping tools never need the person's approval.
+  on('tool.check', { tool: 'mcp__mission-control__progress_plan' }, () => ({ decision: 'allow' }))
+  on('tool.check', { tool: 'mcp__mission-control__progress_checkpoint' }, () => ({ decision: 'allow' }))
+
   // ── Agents ─────────────────────────────────────────────────────────────
   on('agent.spawn', async ($, e, next) => {
     const out = await next(e)
@@ -130,6 +172,8 @@ export const registerTracker = (on: On, afterToolCall?: (tool: string) => void) 
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       await update($, isBusy, () => true)
+      // A turn after finished work is a new request: it forecasts afresh.
+      if ((await read($, main)).phase === 'done') await update($, plans, list => withPlan(list, MAIN, undefined))
       await update($, main, (row): MainRow => ({ phase: 'running', current: 'thinking…', toolCount: row.phase === 'done' ? 0 : row.toolCount }))
     } else await update($, agents, patchAgent(e.agentId, row => ({ ...row, status: 'running' })))
     return next(e)
@@ -141,11 +185,18 @@ export const registerTracker = (on: On, afterToolCall?: (tool: string) => void) 
       await update($, isBusy, () => false)
       await update($, queued, () => 0)
       await update($, main, (row): MainRow => ({ ...row, phase: e.reason === 'answer' ? 'done' : 'idle', current: '' }))
+      if (e.reason === 'answer') {
+        await update($, plans, list => (list[MAIN] ? withPlan(list, MAIN, completePlan(list[MAIN])) : list))
+      }
       // A main-loop turn that died with a window at 100% queues the work for the reset.
       if (e.reason === 'error') await ctl.limits?.onTurnError()
     } else {
       const status: AgentStatus = e.reason === 'aborted' ? 'killed' : e.reason === 'answer' ? 'completed' : 'failed'
       await update($, agents, patchAgent(e.agentId, row => ({ ...row, status, current: '' })))
+      const id = e.agentId
+      if (status === 'completed') {
+        await update($, plans, list => (list[id] ? withPlan(list, id, completePlan(list[id])) : list))
+      }
     }
     return out
   })
@@ -167,7 +218,9 @@ export const registerTracker = (on: On, afterToolCall?: (tool: string) => void) 
     }
 
     // A new piece of work clears what already finished.
-    await update($, agents, list => list.filter(a => !isFinished(a.status)))
+    const live = await update($, agents, list => list.filter(a => !isFinished(a.status)))
+    const keep = new Set([MAIN, ...live.map(a => a.id)])
+    await update($, plans, list => Object.fromEntries(Object.entries(list).filter(([k]) => keep.has(k))))
     await update($, tasks, list => (list.length > 0 && list.every(t => t.status === 'completed') ? [] : list))
     return next(e)
   })

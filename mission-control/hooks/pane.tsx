@@ -1,11 +1,12 @@
 import { atom, read } from 'claude-code'
 import type { On } from 'claude-code'
 
-import type { AgentRow, Limit, MainRow, Resume, Stats, Task } from '../types'
+import type { AgentRow, Limit, MainRow, Plan, Resume, Stats, Task } from '../types'
 import { ACCENT, banner, glyph, moodLabel } from './avatar'
 import type { Mood } from './avatar'
 import { ctl } from './controllers'
-import { bar, formatReset, indeterminate, limitLabel, thousands, truncate } from './format'
+import { bar, countdown, formatReset, limitLabel, thousands, truncate } from './format'
+import { planFraction, planLabel, planRemaining } from './progress'
 import { resumeLabel } from './limits'
 
 // Each module names the atoms it touches (the scan reads them per module).
@@ -20,6 +21,7 @@ const main = atom({ plugin: 'mission-control', key: 'main' } as const, { phase: 
   shape: 'main-1',
 })
 const queued = atom({ plugin: 'mission-control', key: 'queued' } as const, 0)
+const plans = atom({ plugin: 'mission-control', key: 'plans' } as const, {} as Record<string, Plan>, { shape: 'plans-1' })
 
 const MAX_TASK_ROWS = 14
 const MAX_AGENT_ROWS = 8
@@ -41,16 +43,23 @@ type Row = {
   toolCount: number
 }
 
-/** A row's bar: its owned tasks when it has any, else a sweep while it works. */
-const progress = (row: Row, owned: Task[], tick: number, width: number) => {
+/**
+ * A row's fill (0..1) and label: its forecast when it made one, else its owned
+ * tasks, else empty while it plans and full once it finishes. Never a sweep.
+ */
+const progress = (row: Row, plan: Plan | undefined, owned: Task[], now: number) => {
+  if (plan) {
+    const left = planRemaining(plan, now)
+    const isDone = plan.isComplete || row.status === 'completed'
+    return { fraction: isDone ? 1 : planFraction(plan, now), label: isDone ? planLabel(plan) : `${planLabel(plan)} · ~${countdown(left * 1000)}` }
+  }
   if (owned.length > 0) {
     const done = owned.filter(t => t.status === 'completed').length
-    const b = bar(done / owned.length, width)
-    return { filled: b.filled, empty: b.empty, label: `${done}/${owned.length}` }
+    return { fraction: done / owned.length, label: `${done}/${owned.length} tasks` }
   }
-  if (row.isRunning) return { filled: indeterminate(tick, width), empty: '', label: `${row.toolCount} tools` }
-  if (row.status === 'idle') return { filled: '', empty: bar(0, width).empty, label: '' }
-  return { filled: bar(1, width).filled, empty: '', label: `${row.toolCount} tools` }
+  if (row.isRunning) return { fraction: 0, label: 'planning…' }
+  if (row.status === 'idle') return { fraction: 0, label: '' }
+  return { fraction: 1, label: `${row.toolCount} tools` }
 }
 
 const pickMood = (r: { resume: unknown; running: number; busy: boolean; isDone: boolean }): Mood => {
@@ -64,7 +73,7 @@ const pickMood = (r: { resume: unknown; running: number; busy: boolean; isDone: 
 export const registerPane = (on: On) => {
   on('ui.render', { component: 'Pane', requestId: 'dashboard' }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const [taskList, agentList, limitList, s, tick, busy, queuedResume, mainRow, queuedCount] = await Promise.all([
+    const [taskList, agentList, limitList, s, tick, busy, queuedResume, mainRow, queuedCount, planMap] = await Promise.all([
       read($, tasks),
       read($, agents),
       read($, limits),
@@ -74,6 +83,7 @@ export const registerPane = (on: On) => {
       read($, resume),
       read($, main),
       read($, queued),
+      read($, plans),
     ])
     const now = await $.clock.now()
     const isInline = e.props.placement === 'inline'
@@ -108,17 +118,25 @@ export const registerPane = (on: On) => {
         ? taskList.filter(t => t.owner === undefined || t.owner === MAIN || !agentNames.has(t.owner))
         : taskList.filter(t => t.owner === row.name)
 
-    // ── Total: always drawn ──────────────────────────────────────────────
+    // ── Total: always drawn, always a growing fill ───────────────────────
     const done = taskList.filter(t => t.status === 'completed').length
     const running = agentList.filter(a => a.status === 'running').length
-    let total: { fraction?: number; label: string }
-    if (taskList.length > 0) total = { fraction: done / taskList.length, label: `${done}/${taskList.length} tasks` }
-    else if (agentList.length > 0 && (running > 0 || busy))
-      total = { fraction: (agentList.length - running) / agentList.length, label: `${agentList.length - running}/${agentList.length} agents` }
-    else if (busy) total = { label: 'working' }
+    const agentPlans = agentList.map(a => planMap[a.id]).filter((p): p is Plan => p !== undefined)
+    let total: { fraction: number; label: string }
+    const mainPlan = planMap[MAIN]
+    if (mainPlan) {
+      const isFinished = mainPlan.isComplete || (!busy && mainRow.phase === 'done')
+      total = isFinished
+        ? { fraction: 1, label: 'done' }
+        : { fraction: planFraction(mainPlan, now), label: `${planLabel(mainPlan)} · ~${countdown(planRemaining(mainPlan, now) * 1000)} left` }
+    } else if (agentPlans.length > 0) {
+      const f = agentPlans.reduce((n, p) => n + planFraction(p, now), 0) / agentPlans.length
+      total = { fraction: f, label: `${agentPlans.filter(p => p.isComplete).length}/${agentPlans.length} agents` }
+    } else if (taskList.length > 0) total = { fraction: done / taskList.length, label: `${done}/${taskList.length} tasks` }
+    else if (busy) total = { fraction: 0, label: 'planning…' }
     else if (mainRow.phase === 'done') total = { fraction: 1, label: 'done' }
     else total = { fraction: 0, label: 'ready' }
-    const pct = total.fraction === undefined ? undefined : Math.round(total.fraction * 100)
+    const pct = Math.round(total.fraction * 100)
 
     const isDone = !busy && running === 0 && (taskList.length > 0 ? done === taskList.length : mainRow.phase === 'done')
     const m = pickMood({ resume: queuedResume, running, busy, isDone })
@@ -132,12 +150,12 @@ export const registerPane = (on: On) => {
       .join(' · ')
 
     const totalBar = (width: number) => {
-      const b = total.fraction === undefined ? { filled: indeterminate(tick, width), empty: '' } : bar(total.fraction, width)
+      const b = bar(total.fraction, width)
       return (
         <Text>
           <Text color={ACCENT}>{b.filled}</Text>
           <Text dimColor>{b.empty}</Text>
-          <Text bold> {pct === undefined ? '' : `${pct}% `}</Text>
+          <Text bold> {pct}% </Text>
           <Text dimColor>{total.label}</Text>
         </Text>
       )
@@ -166,11 +184,12 @@ export const registerPane = (on: On) => {
             .filter(r => r.isRunning)
             .slice(0, 4)
             .map(r => {
-              const p = progress(r, ownedBy(r), tick, 8)
+              const p = progress(r, planMap[r.key], ownedBy(r), now)
+              const b = bar(p.fraction, 8)
               return (
                 <Text wrap="truncate-end">
-                  <Text color={ACCENT}>{truncate(r.name, 8).padEnd(8)}</Text> {p.filled}
-                  <Text dimColor>{p.empty}</Text> <Text dimColor>{r.current}</Text>
+                  <Text color={ACCENT}>{truncate(r.name, 8).padEnd(8)}</Text> {b.filled}
+                  <Text dimColor>{b.empty}</Text> <Text dimColor>{r.current}</Text>
                 </Text>
               )
             })}
@@ -196,13 +215,13 @@ export const registerPane = (on: On) => {
         <Box flexDirection="column">
           {banner(m, tick, W).map(r => (
             <Text>
-              <Text color={ACCENT} dimColor={r.isDim}>
+              <Text color={r.color} dimColor={r.isDim}>
                 {r.before}
               </Text>
               <Text color="text" bold>
                 {r.lit}
               </Text>
-              <Text color={ACCENT} dimColor={r.isDim}>
+              <Text color={r.color} dimColor={r.isDim}>
                 {r.after}
               </Text>
             </Text>
@@ -235,7 +254,8 @@ export const registerPane = (on: On) => {
         <Box flexDirection="column" marginTop={1}>
           {section('agents')}
           {rows.map(r => {
-            const p = progress(r, ownedBy(r), tick, rowBarWidth)
+            const p = progress(r, planMap[r.key], ownedBy(r), now)
+            const b = bar(p.fraction, rowBarWidth)
             const isBad = r.status === 'failed' || r.status === 'killed'
             const mark = r.status === 'completed' && r.key !== MAIN ? ' ✔' : isBad ? ' ✗' : ''
             const barColor = isBad ? 'error' : r.isRunning ? ACCENT : 'success'
@@ -245,8 +265,8 @@ export const registerPane = (on: On) => {
                   <Text color={r.isRunning ? ACCENT : undefined} bold={r.isRunning} dimColor={!r.isRunning}>
                     {truncate(r.name, nameWidth).padEnd(nameWidth)}
                   </Text>{' '}
-                  <Text color={barColor}>{p.filled}</Text>
-                  <Text dimColor>{p.empty}</Text>
+                  <Text color={barColor}>{b.filled}</Text>
+                  <Text dimColor>{b.empty}</Text>
                   <Text dimColor>
                     {' '}
                     {p.label}

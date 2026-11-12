@@ -29,6 +29,7 @@ const engine = (
   const clock = mock.clock(on, { now: T0 })
   mock.store(on)
   on('command.register', () => ({ value: { command: 'mission' } }))
+  on('tool.register', () => ({ value: {} }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.toast', () => ({ value: undefined }))
   on('session.id', () => ({ value: 'sess-1' }))
@@ -80,7 +81,7 @@ test('a spawned agent shows its bar and what it is doing now', async ($, on) => 
   await $.tool.call({ tool: 'Edit', file_path: '/repo/src/auth.ts', old_string: 'a', new_string: 'b', agentId: 'a1' })
 
   const ui = await $.ui.mount(pane('dock'))
-  expect(await ui.find({ type: 'Text', text: /^api .*1 tools/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^api .*planning…/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /↳ Edit auth\.ts/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /agents at work · 1 agent$/ })).toBeDefined()
   await ui.unmount()
@@ -181,7 +182,7 @@ test('the main thread is the first agent row, and the total bar always shows', a
   await $.tool.call({ tool: 'Bash', command: 'npm test' })
   ui = await $.ui.mount(pane('dock'))
   expect(await ui.find({ type: 'Text', text: /↳ Bash npm test/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /working$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /0% planning…$/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -203,4 +204,42 @@ test('queuing three prompts mid-turn tells Claude to reorganise into tasks and a
   const ui = await $.ui.mount(pane('dock'))
   expect(await ui.find({ type: 'Text', text: /4 queued/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('the bar grows along the forecast checkpoints instead of sweeping', async ($, on) => {
+  const clock = engine(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await $.session.start(START)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+
+  const plan = await $.tool.call({
+    tool: 'mcp__mission-control__progress_plan',
+    checkpoints: [
+      { label: 'Read the code', estimateSeconds: 60 },
+      { label: 'Make the edit', estimateSeconds: 60 },
+    ],
+  } as never)
+  expect(JSON.stringify(plan)).toContain('2 checkpoints')
+
+  const totalText = async () => {
+    const ui = await $.ui.mount(pane('dock'))
+    const t = (await ui.find({ type: 'Text', text: /% 0\/2|% 1\/2|% done/ }))?.text
+    await ui.unmount()
+    return t
+  }
+
+  expect(await totalText()).toMatch(/ 0% 0\/2 · Read the code/)
+  await clock.advance(30_000)
+  expect(await totalText()).toMatch(/ 25% 0\/2/)
+  // Time alone stops short of the next checkpoint.
+  await clock.advance(120_000)
+  expect(await totalText()).toMatch(/ 45% 0\/2/)
+
+  await $.tool.call({ tool: 'mcp__mission-control__progress_checkpoint' } as never)
+  expect(await totalText()).toMatch(/ 50% 1\/2 · Make the edit/)
+  await $.tool.call({ tool: 'mcp__mission-control__progress_checkpoint' } as never)
+  expect(await totalText()).toMatch(/100% done/)
+
+  const check = await $.tool.check({ tool: 'mcp__mission-control__progress_checkpoint' } as never)
+  expect(check.decision).toBe('allow')
 })

@@ -76,8 +76,12 @@ export const describeCall = (tool: string, input: Record<string, unknown>): stri
       return `TaskUpdate #${s('taskId')} ${s('status')}`.trim()
     case 'TaskCreate':
       return `TaskCreate ${s('subject')}`
+    case 'mcp__mission-control__progress_plan':
+      return 'Planning checkpoints'
+    case 'mcp__mission-control__progress_checkpoint':
+      return `Checkpoint${s('label') ? `: ${s('label')}` : ' reached'}`
     default:
-      return tool
+      return tool.startsWith('mcp__') ? tool.split('__').slice(1).join(' ') : tool
   }
 }
 

@@ -8,6 +8,7 @@ import { WORKFLOW_SECTION } from './instructions'
 import { makeLimits, toLimit } from './limits'
 import { registerPane } from './pane'
 import { PANE, TITLE } from './state'
+import { CHECKPOINT_SPEC, PLAN_SPEC } from './progress'
 import { collectStats } from './stats'
 import { reconcile, registerTracker } from './tracker'
 
@@ -69,6 +70,10 @@ export const register: Register = on => {
         void refreshStats().catch(() => undefined)
       })
     }
+
+    // The tools Claude forecasts and reports progress with.
+    await $.tool.register(PLAN_SPEC)
+    await $.tool.register(CHECKPOINT_SPEC)
 
     await $.command.register({
       name: 'mission',

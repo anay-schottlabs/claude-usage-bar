@@ -54,6 +54,16 @@ export type MainRow = {
   toolCount: number
 }
 
+/** A loop's own forecast: ordered checkpoints, each with its estimated length. */
+export type Plan = {
+  checkpoints: { label: string; seconds: number }[]
+  /** How many checkpoints are reached, in order. */
+  reached: number
+  /** Epoch ms the current checkpoint's segment began. */
+  segmentStartedAt: number
+  isComplete: boolean
+}
+
 export type Resume = {
   /** Epoch milliseconds the resume fires at. */
   at: number
@@ -73,6 +83,8 @@ declare module 'claude-code' {
       main: Shaped<MainRow>
       /** Prompts the person queued during the running main turn. */
       queued: number
+      /** Progress plans by loop: `main` or a subagent's id. */
+      plans: Shaped<Record<string, Plan>>
     }
   }
 }
