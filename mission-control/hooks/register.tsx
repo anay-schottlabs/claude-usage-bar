@@ -19,7 +19,7 @@ const limits = atom({ plugin: 'mission-control', key: 'limits' } as const, [] as
 const resume = atom({ plugin: 'mission-control', key: 'resume' } as const, null as Resume | null, { shape: 'resume-1' })
 const stats = atom({ plugin: 'mission-control', key: 'stats' } as const, { added: 0, removed: 0, isRepo: false } as Stats, { shape: 'stats-1' })
 
-const TICK_MS = 300
+const TICK_MS = 150
 const LIMIT_SYNC_TICKS = Math.round(5000 / TICK_MS)
 const STATS_TICKS = Math.round(30000 / TICK_MS)
 const AGENT_SYNC_TICKS = Math.round(3000 / TICK_MS)
@@ -90,7 +90,7 @@ export const register: Register = on => {
         const isActive =
           (await read($, isBusy)) || (await read($, resume)) !== null || rows.some(a => a.status === 'running')
         // Animate briskly while something is happening, slowly when idle.
-        if (isActive || ticks % 4 === 0) await update($, frame, n => (n + 1) % 1_000_000)
+        if (isActive || ticks % 2 === 0) await update($, frame, n => (n + 1) % 1_000_000)
         if (ticks % LIMIT_SYNC_TICKS === 0) await ctl.limits?.apply()
         if (ticks % AGENT_SYNC_TICKS === 0 && rows.some(a => a.status === 'running')) {
           const live = await $.agent.list()

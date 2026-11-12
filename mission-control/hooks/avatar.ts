@@ -48,15 +48,15 @@ export const banner = (mood: Mood, tick: number, width: number): BannerRow[] => 
   const rows = width >= BANNER_WIDTH ? BIG_ROWS : SMALL_ROWS
   const w = rows[0]!.length
   const cycle = w + rows.length + BAND * 2 + 8
-  const speed = mood === 'agents' ? 3 : mood === 'working' ? 2 : 1
+  const speed = mood === 'agents' ? 3 : 2
   const head = ((tick * speed) % cycle) - BAND
 
   return rows.map((row, r) => {
     if (mood === 'waiting') return { before: row, lit: '', after: '', isDim: true }
-    if (mood === 'done') return tick % 6 < 3 ? { before: '', lit: row, after: '', isDim: false } : { before: row, lit: '', after: '', isDim: false }
-    if (mood === 'idle' && tick % (w + 20) >= w) return { before: row, lit: '', after: '', isDim: false }
+    if (mood === 'done') return tick % 8 < 4 ? { before: '', lit: row, after: '', isDim: false } : { before: row, lit: '', after: '', isDim: false }
+    if (mood === 'idle' && (tick * 2) % (w + 20) >= w) return { before: row, lit: '', after: '', isDim: false }
     // A diagonal: lower rows lag a column per row.
-    const start = Math.max(0, Math.min(w, (mood === 'idle' ? tick % (w + 20) : head) - r))
+    const start = Math.max(0, Math.min(w, (mood === 'idle' ? (tick * 2) % (w + 20) : head) - r))
     const end = Math.max(0, Math.min(w, start + BAND))
     return { before: row.slice(0, start), lit: row.slice(start, end), after: row.slice(end), isDim: mood !== 'idle' }
   })
