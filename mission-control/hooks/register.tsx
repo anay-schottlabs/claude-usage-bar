@@ -1,3 +1,8 @@
+// Entry module (hooks.json): wires the tracker and the pane, injects the
+// workflow instructions into every chat, and at session start builds the
+// controllers, registers the tools and /mission, opens the pane and starts the
+// tick that animates it and keeps limits, agents and git figures fresh.
+
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
@@ -7,8 +12,8 @@ import { ctl } from './controllers'
 import { WORKFLOW_SECTION } from './instructions'
 import { makeLimits, toLimit } from './limits'
 import { registerPane } from './pane'
-import { PANE, TITLE } from './state'
 import { CHECKPOINT_SPEC, PLAN_SPEC } from './progress'
+import { PANE, TITLE } from './state'
 import { collectStats } from './stats'
 import { reconcile, registerTracker } from './tracker'
 
@@ -23,21 +28,26 @@ const stats = atom({ plugin: 'mission-control', key: 'stats' } as const, { added
 // banner (47) with the pane's padding.
 const PANE_OPEN = { id: PANE, title: TITLE, backgroundColor: 'transparent', columns: 52 } as const
 
+/** The animation tick; the slower syncs below run every so many ticks. */
 const TICK_MS = 150
 const LIMIT_SYNC_TICKS = Math.round(5000 / TICK_MS)
-const STATS_TICKS = Math.round(30000 / TICK_MS)
 const AGENT_SYNC_TICKS = Math.round(3000 / TICK_MS)
+const STATS_TICKS = Math.round(30000 / TICK_MS)
+/** Debounce for git figures after a burst of edits. */
+const STATS_DEBOUNCE_MS = 1500
 
+/** Tools whose calls can change the git figures. */
 const STATS_TOOLS = new Set(['Edit', 'Write', 'Bash', 'NotebookEdit'])
 
+/** The hooks module's entry point. */
 export const register: Register = on => {
-  // Edits and commands change the git figures: refresh them shortly after.
   registerTracker(on, tool => {
     if (STATS_TOOLS.has(tool)) ctl.touchStats?.()
   })
   registerPane(on)
 
-  // Every chat is told how to keep the dashboard's data structured.
+  // Every chat is told how to keep the dashboard's data structured. The old
+  // copy is filtered out first so a recompose never doubles it.
   on('prompt.compose', async ($, e, next) => {
     const out = await next(e)
     return { sections: [...out.sections.filter(s => s.id !== WORKFLOW_SECTION.id), WORKFLOW_SECTION] }
@@ -46,6 +56,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const cwd = e.cwd
 
+    // The controllers outlive this hook (timers, other hooks), so they get
+    // closures over this `$` rather than `$` itself.
     ctl.limits = makeLimits({
       now: () => $.clock.now(),
       sessionId: async () => String(await $.session.id()),
@@ -61,14 +73,22 @@ export const register: Register = on => {
       toast: text => $.ui.toast(text),
     })
 
+    // One git refresh at a time: a slow repo must not stack up runs.
+    let isRefreshing = false
     const refreshStats = async () => {
-      const fresh = await collectStats((argv, init) => $.process.run(argv, init), cwd, await $.clock.now())
-      await update($, stats, () => fresh)
+      if (isRefreshing) return
+      isRefreshing = true
+      try {
+        const fresh = await collectStats((argv, init) => $.process.run(argv, init), cwd, await $.clock.now())
+        await update($, stats, () => fresh)
+      } finally {
+        isRefreshing = false
+      }
     }
     let statsPending: { cancel: () => void } | undefined
     ctl.touchStats = () => {
       if (statsPending) return
-      statsPending = $.clock.after(1500, () => {
+      statsPending = $.clock.after(STATS_DEBOUNCE_MS, () => {
         statsPending = undefined
         void refreshStats().catch(() => undefined)
       })
@@ -94,13 +114,15 @@ export const register: Register = on => {
     $.clock.every(TICK_MS, () => {
       ticks++
       void (async () => {
-        const rows = await read($, agents)
         await update($, frame, n => (n + 1) % 1_000_000)
+        // Other sessions write the shared store: pick up their readings.
         if (ticks % LIMIT_SYNC_TICKS === 0) await ctl.limits?.apply()
-        if (ticks % AGENT_SYNC_TICKS === 0 && rows.some(a => a.status === 'running')) {
+        // Only while something runs: catches agent ends the hooks never heard.
+        if (ticks % AGENT_SYNC_TICKS === 0 && (await read($, agents)).some(a => a.status === 'running')) {
           const live = await $.agent.list()
           await update($, agents, list => reconcile(list, live))
         }
+        // Catches changes made outside this chat (another terminal, a pull).
         if (ticks % STATS_TICKS === 0) await refreshStats()
       })().catch(() => undefined)
     })
@@ -108,11 +130,13 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Each response carries this session's fresh readings.
   on('session.measure', async ($, e, next) => {
     await ctl.limits?.apply(e.rateLimits.map(toLimit))
     return next(e)
   })
 
+  // /mission opens the pane; its subcommands exercise and cancel the auto-resume.
   on('command.run', { command: 'mission' }, async ($, e) => {
     const [sub, arg] = e.args.trim().split(/\s+/)
     if (sub === 'test-resume' && ctl.limits) {

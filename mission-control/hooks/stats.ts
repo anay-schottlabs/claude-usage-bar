@@ -1,3 +1,7 @@
+// Git and code-size figures for the pane's project section, gathered by
+// running git (and a small shell script) through `$.process.run`, which the
+// caller hands in as a plain function.
+
 import type { ProcessRunInit, ProcessRunResult } from 'claude-code'
 
 import type { Stats } from '../types'
@@ -31,17 +35,20 @@ else
 fi
 `
 
+/** Counting lines walks the whole tree, so a count is reused for this long. */
 const CODE_LINES_TTL_MS = 30 * 1000
 let lastCount: { cwd: string; at: number; total: number } | undefined
 
 /** `$.process.run`, handed in as a plain function. */
 export type Run = (argv: readonly string[], init?: ProcessRunInit) => Promise<ProcessRunResult>
 
+/** A decimal integer, or undefined for missing or garbled output. */
 const int = (s: string | undefined) => {
   const n = s === undefined ? NaN : parseInt(s, 10)
   return Number.isFinite(n) ? n : undefined
 }
 
+/** Lines of code under `cwd`, cached per directory; undefined if the count failed. */
 const countCodeLines = async (run: Run, cwd: string, now: number) => {
   if (lastCount && lastCount.cwd === cwd && now - lastCount.at < CODE_LINES_TTL_MS) return lastCount.total
   const r = await run(['sh', '-c', COUNT_SCRIPT, 'count', cwd, ...CODE_GLOBS], { timeoutMs: 20000 })
@@ -50,7 +57,11 @@ const countCodeLines = async (run: Run, cwd: string, now: number) => {
   return total
 }
 
-/** The status line's git, commit and line figures, for the pane's project section. */
+/**
+ * The status line's git, commit and line figures, for the pane's project
+ * section. Outside a repo only the line count is filled. Each git call is
+ * independent, so a failing one leaves its figure out rather than failing all.
+ */
 export const collectStats = async (run: Run, cwd: string, now: number): Promise<Stats> => {
   const git = async (args: string[]) => {
     const r = await run(['git', '-C', cwd, ...args], { timeoutMs: 5000 })

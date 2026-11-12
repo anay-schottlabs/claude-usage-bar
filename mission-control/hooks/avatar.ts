@@ -1,8 +1,16 @@
-// The header: "CLAUDE" in block letters with a light sweeping across it.
+// The dashboard's header: "CLAUDE" in block letters with a band of light
+// sweeping across it, plus the spinner glyph and mood label beside the status
+// line. Pure functions of (mood, frame tick, width): the pane re-renders on
+// every `frame` tick and these decide what each frame looks like.
 
+/**
+ * What the header is showing. `agents` is `working` with subagents running
+ * (a faster shine); `waiting` means a rate limit stopped work and an
+ * auto-resume is queued; `done` means the last piece of work finished.
+ */
 export type Mood = 'idle' | 'working' | 'agents' | 'waiting' | 'done'
 
-// Theme keys, so the dashboard follows the person's Claude Code theme.
+/** Claude Code theme key for Claude's own color, so the dashboard follows the person's theme. */
 export const ACCENT = 'claude'
 
 // Five rows, each letter seven columns, one column between letters.
@@ -25,6 +33,7 @@ const SMALL: Record<string, string[]> = {
   E: ['╭─╴', '├╴ ', '╰─╴'],
 }
 
+/** Lays out `word` in `font`: one string per row, letters joined by a single space. */
 const spell = (font: Record<string, string[]>, word: string) => {
   const letters = [...word].map(ch => font[ch]!)
   return letters[0]!.map((_, row) => letters.map(l => l[row]).join(' '))
@@ -32,9 +41,13 @@ const spell = (font: Record<string, string[]>, word: string) => {
 
 const BIG_ROWS = spell(BIG, 'CLAUDE')
 const SMALL_ROWS = spell(SMALL, 'CLAUDE')
+/** Columns the block-letter banner needs; narrower panes get the small box-drawing one. */
 export const BANNER_WIDTH = BIG_ROWS[0]!.length
 
-/** One row of the banner split around the bright band, and its base color. */
+/**
+ * One row of the banner split around the bright band: `before` and `after`
+ * draw in `color` (dimmed when `isDim`), `lit` in bold `litColor`.
+ */
 export type BannerRow = { before: string; lit: string; after: string; isDim: boolean; color: string; litColor: string }
 
 /** Gray at rest; Claude's color while anything works. */
@@ -43,6 +56,7 @@ const IDLE_COLOR = 'inactive'
 const IDLE_SHINE = 'text'
 const WORKING_SHINE = 'claudeShimmer'
 
+/** Width of the bright band, in columns. */
 const BAND = 4
 
 /**
@@ -57,6 +71,8 @@ export const banner = (mood: Mood, tick: number, width: number): BannerRow[] => 
   const isWorking = mood === 'working' || mood === 'agents'
   const color = isWorking ? ACCENT : IDLE_COLOR
   // Columns per tick, and a rest after each pass so it reads as a shine.
+  // The cycle covers the word, the diagonal's lag (one column per row), the
+  // band itself, then the rest: offscreen ticks where nothing is lit.
   const speed = mood === 'agents' ? 5 : isWorking ? 4 : 3
   const cycle = w + rows.length + BAND + (isWorking ? 12 : 8)
   const head = (tick * speed) % cycle
@@ -73,7 +89,7 @@ export const banner = (mood: Mood, tick: number, width: number): BannerRow[] => 
   })
 }
 
-/** The spinner glyph beside the status line. */
+/** The spinner glyph beside the status line: a snoring z while waiting, a still star at rest, a turning one at work. */
 export const glyph = (mood: Mood, tick: number) => {
   if (mood === 'waiting') return ['z', 'Z', 'z', ' '][tick % 4]!
   if (mood === 'done') return '✸'
@@ -81,5 +97,6 @@ export const glyph = (mood: Mood, tick: number) => {
   return ['✻', '✼', '✽', '✾', '✽', '✼'][tick % 6]!
 }
 
+/** The status line's leading words for a mood. */
 export const moodLabel = (mood: Mood) =>
   ({ idle: 'idle', working: 'working…', agents: 'agents at work', waiting: 'waiting for limit reset', done: 'all done' })[mood]

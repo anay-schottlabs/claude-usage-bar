@@ -1,15 +1,31 @@
 #!/usr/bin/env bash
-# Claude Code statusline: shows 5-hour and 7-day rate-limit usage as progress bars.
-# Reads the statusline JSON payload from stdin (see `claude` docs: statusline.md).
+# Claude Code status line (legacy fallback; Mission Control now shows all of
+# this in its dashboard).
+#
+# Claude Code pipes a JSON payload to this script on every render (see the
+# Claude Code docs, statusline.md). It prints three lines:
+#
+#   5h [████░░░░] 40% · resets 3:45 PM (2h30m)  │  7d [██░░░░░░] 12% · resets Thu ...
+#   main ↑2 ↓0  │  17 pushed, 3 unpushed  │  +12 -4 lines  │  1,924 lines of code
+#   <zero-width space, so the blank spacer row survives trimming>
+#
+# Rate-limit readings are cached in ~/.claude so every open session shows the
+# newest one (see render_section). Requires jq and git.
 
 set -euo pipefail
 
 input="$(cat)"
 
+# ── Settings ───────────────────────────────────────────────────────────────
+
 bar_width=40
 reset='\033[0m'
+# Latest reading per rate-limit window, shared by every session on the machine.
 cache_file="$HOME/.claude/claude-usage-bar-cache.json"
+# Last lines-of-code count, so the full scan runs at most every 30s.
 line_count_cache="$HOME/.claude/claude-usage-bar-linecount-cache.json"
+
+# ── Rate-limit cache ───────────────────────────────────────────────────────
 
 # Last-known used_percentage/resets_at for a rate-limit window ("five_hour" or
 # "seven_day"), read from the on-disk cache. Empty if no cache or field missing.
@@ -33,6 +49,8 @@ write_cache_field() {
   fi
   mv "$tmp" "$cache_file" 2>/dev/null || rm -f "$tmp"
 }
+
+# ── Rate-limit bars ────────────────────────────────────────────────────────
 
 # Build a filled/empty block bar string of the given width for a percentage.
 render_bar() {
@@ -73,7 +91,10 @@ format_reset() {
   printf '%s (%s)' "$time_str" "$dur_str"
 }
 
-# label, jq path, bar width, low color, mid color, cache key, include_date -- high color is always red.
+# One rate-limit window as "5h [bar] 40% · resets ...", or "5h [····] n/a"
+# with no reading. Arguments: label, jq path of the percentage, jq path of
+# resets_at, color under 50%, color for 50-79%, cache key, and include_date
+# (1 for windows long enough that the reset day matters). 80%+ is always red.
 render_section() {
   local label="$1" pct_path="$2" resets_path="$3" low_color="$4" mid_color="$5" cache_key="$6" include_date="${7:-0}"
   local pct resets_at pct_int bar color reset_str
@@ -143,7 +164,10 @@ render_section() {
   printf "%s [${color}%s${reset}] %d%%%s" "$label" "$bar" "$pct_int" "$reset_str"
 }
 
-# "+123 -45 lines" from this session's cumulative edits (green/red, 0 omitted if both are 0).
+# ── Project stats ──────────────────────────────────────────────────────────
+
+# "+123 -45 lines" from this session's cumulative edits (green/red), or
+# "lines ±0" when nothing has changed. The escapes are expanded by the caller.
 render_lines_changed() {
   local added removed
   added="$(jq -r '.cost.total_lines_added // 0' <<<"$input")"
@@ -157,7 +181,8 @@ render_lines_changed() {
   printf "\033[32m+%s\033[0m \033[31m-%s\033[0m lines" "$added" "$removed"
 }
 
-# "main ↑2 ↓0" style branch + ahead/behind summary.
+# "main ↑2 ↓0" style branch + ahead/behind summary (no arrows without an
+# upstream), or "no git repo".
 render_git_status() {
   local cwd branch ahead behind sync_str
 
@@ -257,6 +282,8 @@ render_total_lines() {
   printf '%s lines of code' "$formatted"
 }
 
+# ── Output ─────────────────────────────────────────────────────────────────
+
 five_hour="$(render_section "5h" '.rate_limits.five_hour.used_percentage' '.rate_limits.five_hour.resets_at' '\033[32m' '\033[33m' 'five_hour')"
 seven_day="$(render_section "7d" '.rate_limits.seven_day.used_percentage' '.rate_limits.seven_day.resets_at' '\033[36m' '\033[35m' 'seven_day' 1)"
 lines_changed="$(render_lines_changed)"
@@ -264,6 +291,7 @@ git_status="$(render_git_status)"
 commit_stats="$(render_commit_stats)"
 total_lines="$(render_total_lines)"
 
+# Line 1: both rate limits. Line 2: project stats, joined by │ separators.
 stats_line="$git_status"
 [ -n "$commit_stats" ] && stats_line="$stats_line  │  $commit_stats"
 stats_line="$stats_line  │  $(printf '%b' "$lines_changed")"

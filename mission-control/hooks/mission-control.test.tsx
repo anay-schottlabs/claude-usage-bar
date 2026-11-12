@@ -82,7 +82,7 @@ test('a spawned agent shows its bar and what it is doing now', async ($, on) => 
 
   const ui = await $.ui.mount(pane('dock'))
   expect(await ui.find({ type: 'Text', text: /^api .*planning…/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /↳ Edit auth\.ts/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /↳ Editing auth\.ts/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /agents at work · 1 agent$/ })).toBeDefined()
   await ui.unmount()
 })
@@ -181,7 +181,7 @@ test('the main thread is the first agent row, and the total bar always shows', a
   await $.turn.start({ text: 'go', turnId: 't1' })
   await $.tool.call({ tool: 'Bash', command: 'npm test' })
   ui = await $.ui.mount(pane('dock'))
-  expect(await ui.find({ type: 'Text', text: /↳ Bash npm test/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /↳ Running tests/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /0% planning…$/ })).toBeDefined()
   await ui.unmount()
 })
@@ -242,4 +242,45 @@ test('the bar grows along the forecast checkpoints instead of sweeping', async (
 
   const check = await $.tool.check({ tool: 'mcp__mission-control__progress_checkpoint' } as never)
   expect(check.decision).toBe('allow')
+})
+
+test('a plan survives turns started by agent reports and only resets on a typed prompt', async ($, on) => {
+  engine(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'a1' }))
+  await $.session.start(START)
+
+  const total = async () => {
+    const ui = await $.ui.mount(pane('dock'))
+    const t = (await ui.find({ type: 'Text', text: /% (0|1|2)\/2|% done|% ready/ }))?.text
+    await ui.unmount()
+    return t
+  }
+
+  await $.turn.start({ text: 'big job', turnId: 't1' })
+  await $.tool.call({
+    tool: 'mcp__mission-control__progress_plan',
+    checkpoints: [
+      { label: 'Agents spawned', estimateSeconds: 60 },
+      { label: 'Agents done', estimateSeconds: 60 },
+    ],
+  } as never)
+  await $.agent.spawn({ prompt: 'x', description: 'Worker', name: 'worker' } as never)
+  await $.tool.call({ tool: 'mcp__mission-control__progress_checkpoint' } as never)
+  // The main turn answers while the agent still runs: not done yet.
+  await $.turn.complete({ answer: 'started', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(await total()).toMatch(/ 50% 1\/2/)
+
+  // The agent's report starts a new main turn: the plan carries on.
+  await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 'ta', reason: 'answer', agentId: 'a1' } as never)
+  await $.turn.start({ text: '', turnId: 't2' })
+  expect(await total()).toMatch(/ 50% 1\/2/)
+  await $.tool.call({ tool: 'mcp__mission-control__progress_checkpoint' } as never)
+  await $.turn.complete({ answer: 'all done', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  expect(await total()).toMatch(/100% done/)
+
+  // A prompt the person types starts afresh.
+  await $.prompt.submit({ text: 'next thing', origin: { kind: 'composer' } } as never)
+  expect(await total()).toMatch(/100% done|0% ready/)
 })

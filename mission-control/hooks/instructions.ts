@@ -1,3 +1,10 @@
+// Text the mod puts in front of the model: the standing workflow section, the
+// auto-resume prompt, and the nudge attached once prompts pile up mid-turn.
+
+/**
+ * Appended to every chat's system prompt: the dashboard is only as good as
+ * the plan, task and agent data the model keeps, so it is told how.
+ */
 export const WORKFLOW_SECTION = {
   id: 'mission-control:workflow',
   scope: 'session',
@@ -11,13 +18,17 @@ export const WORKFLOW_SECTION = {
   ].join('\n'),
 } as const
 
+/** Submitted by the auto-resume once the rate limit has reset. */
 export const RESUME_PROMPT =
   'The rate limit has reset. Continue the interrupted work: check TaskList and the state of any agents, then resume from the first incomplete task, spawning agents again for tasks whose agents did not finish.'
 
-/** Queued prompts in one turn at which Claude is told to reorganise. */
+/** Prompts queued in one turn at which Claude is told to reorganise. */
 export const QUEUE_THRESHOLD = 3
 
-/** Context attached to a queued prompt once the queue reaches the threshold. */
+/**
+ * Context attached to a queued prompt once the queue reaches the threshold:
+ * the full reorganise instruction once, then a short reminder for each later one.
+ */
 export const queueContext = (count: number) =>
   count === QUEUE_THRESHOLD
     ? [

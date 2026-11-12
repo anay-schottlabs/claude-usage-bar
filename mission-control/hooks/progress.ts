@@ -1,17 +1,23 @@
-// Progress plans: each loop forecasts its checkpoints, and the bar grows
-// toward the next one as its estimated time passes, then jumps to it when
-// the checkpoint is reported.
+// Progress plans: each loop (main or a subagent) forecasts its checkpoints
+// with the progress_plan tool. Its bar grows toward the next checkpoint as that
+// checkpoint's estimated time passes, then jumps to it when progress_checkpoint
+// reports it. This file holds the tool specs and the pure plan arithmetic.
 
 import type { Plan } from '../types'
 
-export const PLAN_TOOL = 'progress_plan'
-export const CHECKPOINT_TOOL = 'progress_checkpoint'
+const PLAN_TOOL = 'progress_plan'
+const CHECKPOINT_TOOL = 'progress_checkpoint'
+/** The names the model calls them by, as the engine prefixes a plugin's tools. */
 export const PLAN_TOOL_FULL = 'mcp__mission-control__progress_plan'
 export const CHECKPOINT_TOOL_FULL = 'mcp__mission-control__progress_checkpoint'
 
-/** Within a segment the bar never passes this share before the checkpoint lands. */
+/**
+ * Within a segment the bar never passes this share before the checkpoint is
+ * reported, so an overrun estimate stalls short of it instead of lying.
+ */
 const SEGMENT_CAP = 0.9
 
+/** `$.tool.register` spec of the forecast tool. */
 export const PLAN_SPEC = {
   name: PLAN_TOOL,
   description:
@@ -38,6 +44,7 @@ export const PLAN_SPEC = {
   isDeferred: false,
 } as const
 
+/** `$.tool.register` spec of the checkpoint tool. */
 export const CHECKPOINT_SPEC = {
   name: CHECKPOINT_TOOL,
   description:
@@ -49,11 +56,16 @@ export const CHECKPOINT_SPEC = {
   isDeferred: false,
 } as const
 
-type PlanInput = { checkpoints?: { label?: unknown; estimateSeconds?: unknown }[] }
+/** The forecast tool's input, untrusted: the model may send anything. */
+export type PlanInput = { checkpoints?: { label?: unknown; estimateSeconds?: unknown }[] }
 
-/** A new or revised plan: reached checkpoints stay, the rest is replaced. */
+/**
+ * A new or revised plan: reached checkpoints stay, the rest is replaced. A
+ * revision keeps the current segment's start so the time already spent on it
+ * still counts. Labels and estimates are sanitised (at least 5s each, 50 max).
+ */
 export const applyPlan = (prev: Plan | undefined, input: PlanInput, now: number): Plan => {
-  const next = (input.checkpoints ?? [])
+  const ahead = (input.checkpoints ?? [])
     .map(c => ({
       label: typeof c.label === 'string' && c.label.trim() !== '' ? c.label.trim() : 'step',
       seconds: Math.max(5, Number(c.estimateSeconds) || 60),
@@ -61,18 +73,20 @@ export const applyPlan = (prev: Plan | undefined, input: PlanInput, now: number)
     .slice(0, 50)
   const kept = prev && !prev.isComplete ? prev.checkpoints.slice(0, prev.reached) : []
   return {
-    checkpoints: [...kept, ...next],
+    checkpoints: [...kept, ...ahead],
     reached: kept.length,
     segmentStartedAt: prev && !prev.isComplete ? prev.segmentStartedAt : now,
-    isComplete: next.length === 0,
+    isComplete: ahead.length === 0,
   }
 }
 
+/** The next checkpoint reached: the bar jumps to it and a new segment starts now. */
 export const applyCheckpoint = (prev: Plan, now: number): Plan => {
   const reached = Math.min(prev.checkpoints.length, prev.reached + 1)
   return { ...prev, reached, segmentStartedAt: now, isComplete: reached >= prev.checkpoints.length }
 }
 
+/** Every checkpoint reached: the loop finished, whether or not it reported each one. */
 export const completePlan = (prev: Plan): Plan => ({ ...prev, reached: prev.checkpoints.length, isComplete: true })
 
 /** The plan's share done (0..1): reached checkpoints plus time into the current one. */

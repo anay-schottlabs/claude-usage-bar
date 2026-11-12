@@ -1,7 +1,13 @@
+// The Mission Control pane (id `dashboard`). Docked beside the chat it draws
+// the full dashboard: banner, total progress, agent rows, tasks, rate limits
+// and project stats. Placed inline (a narrow terminal) it collapses to a few
+// rows above the prompt. Everything here is read-only: the trackers write the
+// atoms, this module only renders them.
+
 import { atom, read } from 'claude-code'
 import type { On } from 'claude-code'
 
-import type { AgentRow, Limit, MainRow, Plan, Resume, Stats, Task } from '../types'
+import type { AgentRow, AgentStatus, Limit, MainRow, Plan, Resume, Stats, Task } from '../types'
 import { ACCENT, banner, glyph, moodLabel } from './avatar'
 import type { Mood } from './avatar'
 import { ctl } from './controllers'
@@ -9,7 +15,9 @@ import { bar, countdown, formatReset, limitLabel, thousands, truncate } from './
 import { planFraction, planLabel, planRemaining } from './progress'
 import { resumeLabel } from './limits'
 
-// Each module names the atoms it touches (the scan reads them per module).
+// Atoms can't be imported, and the validator scans each module for the atoms
+// it reads, so every one this pane renders is declared again here with the
+// same plugin, key and shape tag as its writer.
 const agents = atom({ plugin: 'mission-control', key: 'agents' } as const, [] as AgentRow[], { shape: 'agents-1' })
 const frame = atom({ plugin: 'mission-control', key: 'frame' } as const, 0)
 const isBusy = atom({ plugin: 'mission-control', key: 'isBusy' } as const, false)
@@ -24,9 +32,12 @@ const queued = atom({ plugin: 'mission-control', key: 'queued' } as const, 0)
 const plans = atom({ plugin: 'mission-control', key: 'plans' } as const, {} as Record<string, Plan>, { shape: 'plans-1' })
 
 const MAX_TASK_ROWS = 14
+/** Only the newest subagents get a row, so a long session doesn't push the rest off screen. */
 const MAX_AGENT_ROWS = 8
+/** Key and name of the main-thread row, and the `plans` key of its forecast. */
 const MAIN = 'main'
 
+/** Bar color for a rate limit: 7-day uses a different hue pair so the two bars are told apart at a glance. */
 const limitColor = (l: Limit) => {
   const p = l.percentUsed
   if (p >= 80) return 'error'
@@ -34,20 +45,25 @@ const limitColor = (l: Limit) => {
   return p >= 50 ? 'warning' : 'success'
 }
 
+/** One line in the agents section: the main thread or a subagent, normalised to the same shape. */
 type Row = {
   key: string
   name: string
   isRunning: boolean
-  status: 'running' | 'completed' | 'failed' | 'killed' | 'idle'
+  status: AgentStatus | 'idle'
   current: string
   toolCount: number
 }
 
+/** A bar's fill (0..1) and the caption drawn after it. */
+type Progress = { fraction: number; label: string }
+
 /**
- * A row's fill (0..1) and label: its forecast when it made one, else its owned
- * tasks, else empty while it plans and full once it finishes. Never a sweep.
+ * A row's fill and label: its forecast when it made one, else its owned
+ * tasks, else empty while it plans and full once it finishes. Never a sweep:
+ * an indeterminate animation would look like progress that isn't happening.
  */
-const progress = (row: Row, plan: Plan | undefined, owned: Task[], now: number) => {
+const progress = (row: Row, plan: Plan | undefined, owned: Task[], now: number): Progress => {
   if (plan) {
     const left = planRemaining(plan, now)
     const isDone = plan.isComplete || row.status === 'completed'
@@ -62,6 +78,7 @@ const progress = (row: Row, plan: Plan | undefined, owned: Task[], now: number) 
   return { fraction: 1, label: `${row.toolCount} tools` }
 }
 
+/** The banner's mood, in priority order: a pending auto-resume outranks everything. */
 const pickMood = (r: { resume: unknown; running: number; busy: boolean; isDone: boolean }): Mood => {
   if (r.resume) return 'waiting'
   if (r.running > 0) return 'agents'
@@ -70,6 +87,7 @@ const pickMood = (r: { resume: unknown; running: number; busy: boolean; isDone: 
   return 'idle'
 }
 
+/** Registers the `dashboard` pane renderer. */
 export const registerPane = (on: On) => {
   on('ui.render', { component: 'Pane', requestId: 'dashboard' }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
@@ -90,7 +108,9 @@ export const registerPane = (on: On) => {
     // Dock: one column of padding each side.
     const W = Math.max(20, e.props.bodyColumns - (isInline ? 0 : 2))
 
-    // ── Rows: the main thread first, then each subagent ──────────────────
+    // ── Model: rows, total progress, mood ────────────────────────────────
+
+    // The main thread first, then the newest subagents.
     const agentNames = new Set(agentList.map(a => a.name))
     const rows: Row[] = [
       {
@@ -112,35 +132,47 @@ export const registerPane = (on: On) => {
         }),
       ),
     ]
-    // Tasks no agent owns are the main thread's.
+    // Tasks no known agent owns (unowned, or owned by a name nobody spawned) are the main thread's.
     const ownedBy = (row: Row) =>
       row.key === MAIN
         ? taskList.filter(t => t.owner === undefined || t.owner === MAIN || !agentNames.has(t.owner))
         : taskList.filter(t => t.owner === row.name)
 
-    // ── Total: always drawn, always a growing fill ───────────────────────
     const done = taskList.filter(t => t.status === 'completed').length
     const running = agentList.filter(a => a.status === 'running').length
-    const agentPlans = agentList.map(a => planMap[a.id]).filter((p): p is Plan => p !== undefined)
-    let total: { fraction: number; label: string }
-    const mainPlan = planMap[MAIN]
-    if (mainPlan) {
-      const isFinished = mainPlan.isComplete || (!busy && mainRow.phase === 'done')
-      total = isFinished
-        ? { fraction: 1, label: 'done' }
-        : { fraction: planFraction(mainPlan, now), label: `${planLabel(mainPlan)} · ~${countdown(planRemaining(mainPlan, now) * 1000)} left` }
-    } else if (agentPlans.length > 0) {
-      const f = agentPlans.reduce((n, p) => n + planFraction(p, now), 0) / agentPlans.length
-      total = { fraction: f, label: `${agentPlans.filter(p => p.isComplete).length}/${agentPlans.length} agents` }
-    } else if (taskList.length > 0) total = { fraction: done / taskList.length, label: `${done}/${taskList.length} tasks` }
-    else if (busy) total = { fraction: 0, label: 'planning…' }
-    else if (mainRow.phase === 'done') total = { fraction: 1, label: 'done' }
-    else total = { fraction: 0, label: 'ready' }
+
+    /**
+     * The total bar is always drawn and only ever grows. Source of truth, best
+     * first: the main thread's forecast, else the mean of the subagents'
+     * forecasts, else the task list, else the turn phase.
+     */
+    const totalProgress = (): Progress => {
+      const mainPlan = planMap[MAIN]
+      if (mainPlan) {
+        // A finished turn counts as done even if the last checkpoint was never
+        // reported, but not while agents it handed work to are still running.
+        const isFinished = mainPlan.isComplete || (!busy && running === 0 && mainRow.phase === 'done')
+        return isFinished
+          ? { fraction: 1, label: 'done' }
+          : { fraction: planFraction(mainPlan, now), label: `${planLabel(mainPlan)} · ~${countdown(planRemaining(mainPlan, now) * 1000)} left` }
+      }
+      const agentPlans = agentList.map(a => planMap[a.id]).filter((p): p is Plan => p !== undefined)
+      if (agentPlans.length > 0) {
+        const f = agentPlans.reduce((n, p) => n + planFraction(p, now), 0) / agentPlans.length
+        return { fraction: f, label: `${agentPlans.filter(p => p.isComplete).length}/${agentPlans.length} agents` }
+      }
+      if (taskList.length > 0) return { fraction: done / taskList.length, label: `${done}/${taskList.length} tasks` }
+      if (busy) return { fraction: 0, label: 'planning…' }
+      if (mainRow.phase === 'done') return { fraction: 1, label: 'done' }
+      return { fraction: 0, label: 'ready' }
+    }
+    const total = totalProgress()
     const pct = Math.round(total.fraction * 100)
 
     const isDone = !busy && running === 0 && (taskList.length > 0 ? done === taskList.length : mainRow.phase === 'done')
     const m = pickMood({ resume: queuedResume, running, busy, isDone })
 
+    // "agents at work · 1 agent · 2 queued"
     const statusLine = [
       moodLabel(m),
       running > 0 ? `${running} agent${running === 1 ? '' : 's'}` : '',
@@ -149,6 +181,9 @@ export const registerPane = (on: On) => {
       .filter(Boolean)
       .join(' · ')
 
+    // ── Pieces shared by both layouts ────────────────────────────────────
+
+    /** The total bar with its percentage and caption, e.g. "███░░ 40% step 2/5 · ~3m left". */
     const totalBar = (width: number) => {
       const b = bar(total.fraction, width)
       return (
@@ -168,31 +203,43 @@ export const registerPane = (on: On) => {
     )
 
     // ── Inline: a few rows above the prompt ──────────────────────────────
-    if (isInline) {
+
+    /** Glyph, mood and every limit's percentage on one line. */
+    const inlineStatus = () => {
       const limitsText = limitList.map(l => `${limitLabel(l.kind)} ${Math.round(l.percentUsed)}%`).join(' · ')
       return (
-        <Box flexDirection="column">
-          <Text wrap="truncate-end">
-            <Text color={ACCENT} bold>
-              {glyph(m, tick)} Claude{' '}
-            </Text>
-            <Text dimColor>{statusLine}</Text>
-            {limitsText !== '' && <Text dimColor> · {limitsText}</Text>}
+        <Text wrap="truncate-end">
+          <Text color={ACCENT} bold>
+            {glyph(m, tick)} Claude{' '}
           </Text>
+          <Text dimColor>{statusLine}</Text>
+          {limitsText !== '' && <Text dimColor> · {limitsText}</Text>}
+        </Text>
+      )
+    }
+
+    /** Up to four running rows, each a short bar and what it is doing. */
+    const inlineRunningRows = () =>
+      rows
+        .filter(r => r.isRunning)
+        .slice(0, 4)
+        .map(r => {
+          const p = progress(r, planMap[r.key], ownedBy(r), now)
+          const b = bar(p.fraction, 8)
+          return (
+            <Text wrap="truncate-end">
+              <Text color={ACCENT}>{truncate(r.name, 8).padEnd(8)}</Text> {b.filled}
+              <Text dimColor>{b.empty}</Text> <Text dimColor>{r.current}</Text>
+            </Text>
+          )
+        })
+
+    if (isInline) {
+      return (
+        <Box flexDirection="column">
+          {inlineStatus()}
           {totalBar(Math.max(8, Math.min(30, W - 20)))}
-          {rows
-            .filter(r => r.isRunning)
-            .slice(0, 4)
-            .map(r => {
-              const p = progress(r, planMap[r.key], ownedBy(r), now)
-              const b = bar(p.fraction, 8)
-              return (
-                <Text wrap="truncate-end">
-                  <Text color={ACCENT}>{truncate(r.name, 8).padEnd(8)}</Text> {b.filled}
-                  <Text dimColor>{b.empty}</Text> <Text dimColor>{r.current}</Text>
-                </Text>
-              )
-            })}
+          {inlineRunningRows()}
           {queuedResume && <Text color="warning">⏸ Limit reached · auto-resume {resumeLabel(queuedResume.at, now)}</Text>}
           {cancelButton}
         </Box>
@@ -200,177 +247,218 @@ export const registerPane = (on: On) => {
     }
 
     // ── Dock: the full dashboard beside the chat ─────────────────────────
-    const section = (title: string) => (
+
+    /** A "── title ─────" rule spanning the pane. */
+    const sectionTitle = (title: string) => (
       <Text dimColor>{`── ${title} ${'─'.repeat(Math.max(0, W - title.length - 4))}`}</Text>
     )
+
+    /** The CLAUDE banner (each row split into before / lit / after around the shine), then glyph and status. */
+    const header = () => (
+      <Box flexDirection="column">
+        {banner(m, tick, W).map(r => (
+          <Text>
+            <Text color={r.color} dimColor={r.isDim}>
+              {r.before}
+            </Text>
+            <Text color={r.litColor} bold>
+              {r.lit}
+            </Text>
+            <Text color={r.color} dimColor={r.isDim}>
+              {r.after}
+            </Text>
+          </Text>
+        ))}
+        <Box marginTop={1}>
+          <Text wrap="truncate-end">
+            <Text color={ACCENT} bold>
+              {glyph(m, tick)}{' '}
+            </Text>
+            <Text bold>{statusLine}</Text>
+          </Text>
+        </Box>
+      </Box>
+    )
+
+    const progressSection = () => (
+      <Box flexDirection="column" marginTop={1}>
+        {sectionTitle('progress')}
+        <Box marginTop={1}>{totalBar(Math.max(8, W - 18))}</Box>
+      </Box>
+    )
+
+    const resumeNotice = () =>
+      queuedResume && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="warning">⏸ Limit reached. Auto-resume at</Text>
+          <Text color="warning">  {resumeLabel(queuedResume.at, now)}</Text>
+          {cancelButton}
+        </Box>
+      )
+
+    // Names share one column width so the bars line up.
     const nameWidth = Math.min(10, Math.max(4, ...rows.map(r => r.name.length)))
     const rowBarWidth = Math.max(6, Math.min(24, W - nameWidth - 10))
-    const shownTasks = taskList.slice(0, MAX_TASK_ROWS)
-    const hiddenTasks = taskList.length - shownTasks.length
+
+    /** One agent: name, bar and caption, then "↳ what it's doing" beneath. */
+    const agentRow = (r: Row) => {
+      const p = progress(r, planMap[r.key], ownedBy(r), now)
+      const b = bar(p.fraction, rowBarWidth)
+      const isBad = r.status === 'failed' || r.status === 'killed'
+      // The main thread never gets a ✔: it is never really finished, only waiting for you.
+      const mark = r.status === 'completed' && r.key !== MAIN ? ' ✔' : isBad ? ' ✗' : ''
+      const barColor = isBad ? 'error' : r.isRunning ? ACCENT : 'success'
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text wrap="truncate-end">
+            <Text color={r.isRunning ? ACCENT : undefined} bold={r.isRunning} dimColor={!r.isRunning}>
+              {truncate(r.name, nameWidth).padEnd(nameWidth)}
+            </Text>{' '}
+            <Text color={barColor}>{b.filled}</Text>
+            <Text dimColor>{b.empty}</Text>
+            <Text dimColor>
+              {' '}
+              {p.label}
+              {mark}
+            </Text>
+          </Text>
+          {r.current !== '' && (
+            <Text dimColor={!r.isRunning} wrap="truncate-end">
+              <Text dimColor>{'  ↳ '}</Text>
+              {r.current}
+            </Text>
+          )}
+        </Box>
+      )
+    }
+
+    const agentsSection = () => (
+      <Box flexDirection="column" marginTop={1}>
+        {sectionTitle('agents')}
+        {rows.map(r => agentRow(r))}
+      </Box>
+    )
+
+    /** One task: ✔ done (dim), ◐ in progress (its activeForm, bold), ○ pending; subagent owners in parentheses. */
+    const taskLine = (t: Task) => {
+      const owner = t.owner && t.owner !== MAIN ? ` (${t.owner})` : ''
+      if (t.status === 'completed') {
+        return (
+          <Text wrap="truncate-end" dimColor>
+            <Text color="success">✔</Text> {t.subject}
+            {owner}
+          </Text>
+        )
+      }
+      if (t.status === 'in_progress') {
+        return (
+          <Text wrap="truncate-end">
+            <Text color={ACCENT}>◐</Text> <Text bold>{t.activeForm ?? t.subject}</Text>
+            <Text dimColor>{owner}</Text>
+          </Text>
+        )
+      }
+      return (
+        <Text wrap="truncate-end">
+          <Text dimColor>○</Text> {t.subject}
+          <Text dimColor>{owner}</Text>
+        </Text>
+      )
+    }
+
+    /** Left out entirely while there is no task list. */
+    const tasksSection = () => {
+      if (taskList.length === 0) return false
+      const shownTasks = taskList.slice(0, MAX_TASK_ROWS)
+      const hiddenTasks = taskList.length - shownTasks.length
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          {sectionTitle('tasks')}
+          <Box flexDirection="column" marginTop={1}>
+            {shownTasks.map(t => taskLine(t))}
+            {hiddenTasks > 0 && <Text dimColor>  +{hiddenTasks} more</Text>}
+          </Box>
+        </Box>
+      )
+    }
+
     const limitBarWidth = Math.max(6, Math.min(36, W - 9))
+
+    /**
+     * One rate limit and its reset time. A reading whose window has already
+     * reset draws as 0% instead of the stale percentage until a fresh one
+     * arrives. Windows longer than five hours show the day of the reset too.
+     */
+    const limitRow = (l: Limit) => {
+      const isReset = l.resetsAt !== undefined && l.resetsAt <= now
+      const p = isReset ? 0 : Math.round(Math.min(100, Math.max(0, l.percentUsed)))
+      const b = bar(p / 100, limitBarWidth)
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text>
+            <Text bold>{limitLabel(l.kind).padEnd(3)}</Text>
+            <Text color={limitColor({ ...l, percentUsed: p })}>{b.filled}</Text>
+            <Text dimColor>{b.empty}</Text> {String(p).padStart(3)}%
+          </Text>
+          {l.resetsAt !== undefined && (
+            <Text dimColor wrap="truncate-end">
+              {'   '}
+              {isReset ? 'reset, waiting for a new reading' : `resets ${formatReset(l.resetsAt, now, l.kind !== 'five_hour')}`}
+            </Text>
+          )}
+        </Box>
+      )
+    }
+
+    const limitsSection = () => (
+      <Box flexDirection="column" marginTop={1}>
+        {sectionTitle('limits')}
+        {limitList.length === 0 && (
+          <Box marginTop={1}>
+            <Text dimColor>no rate-limit reading yet</Text>
+          </Box>
+        )}
+        {limitList.map(l => limitRow(l))}
+      </Box>
+    )
+
+    /** Branch and sync state, commit counts, uncommitted +/- lines and lines of code. */
+    const projectSection = () => (
+      <Box flexDirection="column" marginTop={1} marginBottom={1}>
+        {sectionTitle('project')}
+        <Box flexDirection="column" marginTop={1}>
+          {s.isRepo ? (
+            <Text wrap="truncate-end">
+              <Text bold>{s.branch}</Text>
+              {s.ahead !== undefined && <Text dimColor>{` ↑${s.ahead} ↓${s.behind ?? 0}`}</Text>}
+            </Text>
+          ) : (
+            <Text dimColor>no git repo</Text>
+          )}
+          {s.pushed !== undefined && (
+            <Text dimColor wrap="truncate-end">
+              {s.pushed} pushed · {s.unpushed ?? 0} unpushed
+            </Text>
+          )}
+          {s.commits !== undefined && <Text dimColor>{s.commits} commits (no upstream)</Text>}
+          <Text wrap="truncate-end">
+            <Text color="success">+{s.added}</Text> <Text color="error">-{s.removed}</Text>
+            <Text dimColor> uncommitted</Text>
+          </Text>
+          {s.codeLines !== undefined && <Text dimColor>{thousands(s.codeLines)} lines of code</Text>}
+        </Box>
+      </Box>
+    )
 
     return (
       <Box flexDirection="column" paddingX={1} paddingTop={1}>
-        {/* Header: the banner, then what is going on */}
-        <Box flexDirection="column">
-          {banner(m, tick, W).map(r => (
-            <Text>
-              <Text color={r.color} dimColor={r.isDim}>
-                {r.before}
-              </Text>
-              <Text color={r.litColor} bold>
-                {r.lit}
-              </Text>
-              <Text color={r.color} dimColor={r.isDim}>
-                {r.after}
-              </Text>
-            </Text>
-          ))}
-          <Box marginTop={1}>
-            <Text wrap="truncate-end">
-              <Text color={ACCENT} bold>
-                {glyph(m, tick)}{' '}
-              </Text>
-              <Text bold>{statusLine}</Text>
-            </Text>
-          </Box>
-        </Box>
-
-        {/* Total progress */}
-        <Box flexDirection="column" marginTop={1}>
-          {section('progress')}
-          <Box marginTop={1}>{totalBar(Math.max(8, W - 18))}</Box>
-        </Box>
-
-        {queuedResume && (
-          <Box flexDirection="column" marginTop={1}>
-            <Text color="warning">⏸ Limit reached. Auto-resume at</Text>
-            <Text color="warning">  {resumeLabel(queuedResume.at, now)}</Text>
-            {cancelButton}
-          </Box>
-        )}
-
-        {/* Agents, the main thread first */}
-        <Box flexDirection="column" marginTop={1}>
-          {section('agents')}
-          {rows.map(r => {
-            const p = progress(r, planMap[r.key], ownedBy(r), now)
-            const b = bar(p.fraction, rowBarWidth)
-            const isBad = r.status === 'failed' || r.status === 'killed'
-            const mark = r.status === 'completed' && r.key !== MAIN ? ' ✔' : isBad ? ' ✗' : ''
-            const barColor = isBad ? 'error' : r.isRunning ? ACCENT : 'success'
-            return (
-              <Box flexDirection="column" marginTop={1}>
-                <Text wrap="truncate-end">
-                  <Text color={r.isRunning ? ACCENT : undefined} bold={r.isRunning} dimColor={!r.isRunning}>
-                    {truncate(r.name, nameWidth).padEnd(nameWidth)}
-                  </Text>{' '}
-                  <Text color={barColor}>{b.filled}</Text>
-                  <Text dimColor>{b.empty}</Text>
-                  <Text dimColor>
-                    {' '}
-                    {p.label}
-                    {mark}
-                  </Text>
-                </Text>
-                {r.current !== '' && (
-                  <Text dimColor={!r.isRunning} wrap="truncate-end">
-                    <Text dimColor>{'  ↳ '}</Text>
-                    {r.current}
-                  </Text>
-                )}
-              </Box>
-            )
-          })}
-        </Box>
-
-        {taskList.length > 0 && (
-          <Box flexDirection="column" marginTop={1}>
-            {section('tasks')}
-            <Box flexDirection="column" marginTop={1}>
-              {shownTasks.map(t => {
-                const owner = t.owner && t.owner !== MAIN ? ` (${t.owner})` : ''
-                if (t.status === 'completed') {
-                  return (
-                    <Text wrap="truncate-end" dimColor>
-                      <Text color="success">✔</Text> {t.subject}
-                      {owner}
-                    </Text>
-                  )
-                }
-                if (t.status === 'in_progress') {
-                  return (
-                    <Text wrap="truncate-end">
-                      <Text color={ACCENT}>◐</Text> <Text bold>{t.activeForm ?? t.subject}</Text>
-                      <Text dimColor>{owner}</Text>
-                    </Text>
-                  )
-                }
-                return (
-                  <Text wrap="truncate-end">
-                    <Text dimColor>○</Text> {t.subject}
-                    <Text dimColor>{owner}</Text>
-                  </Text>
-                )
-              })}
-              {hiddenTasks > 0 && <Text dimColor>  +{hiddenTasks} more</Text>}
-            </Box>
-          </Box>
-        )}
-
-        <Box flexDirection="column" marginTop={1}>
-          {section('limits')}
-          {limitList.length === 0 && (
-            <Box marginTop={1}>
-              <Text dimColor>no rate-limit reading yet</Text>
-            </Box>
-          )}
-          {limitList.map(l => {
-            const isReset = l.resetsAt !== undefined && l.resetsAt <= now
-            const p = isReset ? 0 : Math.round(Math.min(100, Math.max(0, l.percentUsed)))
-            const b = bar(p / 100, limitBarWidth)
-            return (
-              <Box flexDirection="column" marginTop={1}>
-                <Text>
-                  <Text bold>{limitLabel(l.kind).padEnd(3)}</Text>
-                  <Text color={limitColor({ ...l, percentUsed: p })}>{b.filled}</Text>
-                  <Text dimColor>{b.empty}</Text> {String(p).padStart(3)}%
-                </Text>
-                {l.resetsAt !== undefined && (
-                  <Text dimColor wrap="truncate-end">
-                    {'   '}
-                    {isReset ? 'reset, waiting for a new reading' : `resets ${formatReset(l.resetsAt, now, l.kind !== 'five_hour')}`}
-                  </Text>
-                )}
-              </Box>
-            )
-          })}
-        </Box>
-
-        <Box flexDirection="column" marginTop={1} marginBottom={1}>
-          {section('project')}
-          <Box flexDirection="column" marginTop={1}>
-            {s.isRepo ? (
-              <Text wrap="truncate-end">
-                <Text bold>{s.branch}</Text>
-                {s.ahead !== undefined && <Text dimColor>{` ↑${s.ahead} ↓${s.behind ?? 0}`}</Text>}
-              </Text>
-            ) : (
-              <Text dimColor>no git repo</Text>
-            )}
-            {s.pushed !== undefined && (
-              <Text dimColor wrap="truncate-end">
-                {s.pushed} pushed · {s.unpushed ?? 0} unpushed
-              </Text>
-            )}
-            {s.commits !== undefined && <Text dimColor>{s.commits} commits (no upstream)</Text>}
-            <Text wrap="truncate-end">
-              <Text color="success">+{s.added}</Text> <Text color="error">-{s.removed}</Text>
-              <Text dimColor> uncommitted</Text>
-            </Text>
-            {s.codeLines !== undefined && <Text dimColor>{thousands(s.codeLines)} lines of code</Text>}
-          </Box>
-        </Box>
+        {header()}
+        {progressSection()}
+        {resumeNotice()}
+        {agentsSection()}
+        {tasksSection()}
+        {limitsSection()}
+        {projectSection()}
       </Box>
     )
   })
